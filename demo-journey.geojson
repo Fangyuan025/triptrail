@@ -1,0 +1,23 @@
+{
+  "type": "FeatureCollection",
+  "name": "Around the World in 17 Stops",
+  "features": [
+    { "type": "Feature", "properties": { "name": "Reykjavík" },                       "geometry": { "type": "Point", "coordinates": [-21.9426, 64.1466] } },
+    { "type": "Feature", "properties": { "name": "London", "mode": "plane" },         "geometry": { "type": "Point", "coordinates": [-0.1276, 51.5072] } },
+    { "type": "Feature", "properties": { "name": "Paris", "mode": "train" },          "geometry": { "type": "Point", "coordinates": [2.3522, 48.8566] } },
+    { "type": "Feature", "properties": { "name": "Zurich", "mode": "train" },         "geometry": { "type": "Point", "coordinates": [8.5417, 47.3769] } },
+    { "type": "Feature", "properties": { "name": "Venice", "mode": "car" },           "geometry": { "type": "Point", "coordinates": [12.3155, 45.4408] } },
+    { "type": "Feature", "properties": { "name": "Athens", "mode": "boat" },          "geometry": { "type": "Point", "coordinates": [23.7275, 37.9838] } },
+    { "type": "Feature", "properties": { "name": "Cairo", "mode": "plane" },          "geometry": { "type": "Point", "coordinates": [31.2357, 30.0444] } },
+    { "type": "Feature", "properties": { "name": "Dubai", "mode": "plane" },          "geometry": { "type": "Point", "coordinates": [55.2708, 25.2048] } },
+    { "type": "Feature", "properties": { "name": "Mumbai", "mode": "boat" },          "geometry": { "type": "Point", "coordinates": [72.8777, 19.0760] } },
+    { "type": "Feature", "properties": { "name": "Bangkok", "mode": "plane" },        "geometry": { "type": "Point", "coordinates": [100.5018, 13.7563] } },
+    { "type": "Feature", "properties": { "name": "Singapore", "mode": "train" },      "geometry": { "type": "Point", "coordinates": [103.8198, 1.3521] } },
+    { "type": "Feature", "properties": { "name": "Tokyo", "mode": "plane" },          "geometry": { "type": "Point", "coordinates": [139.6917, 35.6895] } },
+    { "type": "Feature", "properties": { "name": "Honolulu", "mode": "plane" },       "geometry": { "type": "Point", "coordinates": [-157.8583, 21.3069] } },
+    { "type": "Feature", "properties": { "name": "San Francisco", "mode": "plane" },  "geometry": { "type": "Point", "coordinates": [-122.4194, 37.7749] } },
+    { "type": "Feature", "properties": { "name": "Las Vegas", "mode": "car" },        "geometry": { "type": "Point", "coordinates": [-115.1398, 36.1699] } },
+    { "type": "Feature", "properties": { "name": "New York", "mode": "plane" },       "geometry": { "type": "Point", "coordinates": [-74.0060, 40.7128] } },
+    { "type": "Feature", "properties": { "name": "Reykjavík ", "mode": "plane" },     "geometry": { "type": "Point", "coordinates": [-21.9426, 64.1466] } }
+  ]
+}

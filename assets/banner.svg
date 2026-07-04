@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e1116"/>
+      <stop offset="1" stop-color="#141b26"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff5a3c" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#ff5a3c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="320" rx="16" fill="url(#bg)"/>
+
+  <!-- faint graticule -->
+  <g stroke="#2a323d" stroke-width="1" opacity=".5">
+    <path d="M0 80 H1200 M0 160 H1200 M0 240 H1200"/>
+    <path d="M150 0 V320 M350 0 V320 M550 0 V320 M750 0 V320 M950 0 V320"/>
+  </g>
+
+  <!-- landmass blobs -->
+  <g fill="#1c2733" opacity=".9">
+    <path d="M60 220 q60 -70 150 -55 q70 10 95 55 q-30 45 -110 42 q-100 -4 -135 -42 Z"/>
+    <path d="M480 120 q80 -55 170 -30 q60 18 70 55 q-40 55 -130 48 q-85 -7 -110 -73 Z"/>
+    <path d="M900 230 q50 -60 140 -50 q75 9 95 50 q-45 50 -130 45 q-80 -5 -105 -45 Z"/>
+  </g>
+
+  <!-- traveled trail -->
+  <path d="M120 218 C 260 150, 380 96, 520 128" fill="none" stroke="url(#trail)" stroke-width="5" stroke-linecap="round"/>
+  <!-- upcoming dashes -->
+  <path d="M600 142 C 740 180, 860 230, 990 226" fill="none" stroke="#8b97a7" stroke-width="3.5" stroke-dasharray="2 14" stroke-linecap="round" opacity=".65"/>
+
+  <!-- origin pin -->
+  <circle cx="120" cy="218" r="9" fill="#ff5a3c" stroke="#fff" stroke-width="3.5"/>
+  <circle cx="120" cy="218" r="17" fill="none" stroke="#ff5a3c" stroke-width="2.5" opacity=".45"/>
+  <!-- destination pin -->
+  <circle cx="990" cy="226" r="9" fill="#fff" opacity=".9"/>
+  <circle cx="990" cy="226" r="9" fill="none" stroke="#8b97a7" stroke-width="2.5"/>
+
+  <!-- plane marker -->
+  <g transform="translate(560,136)">
+    <circle r="30" fill="#fff"/>
+    <circle r="30" fill="none" stroke="#ff5a3c" stroke-width="5"/>
+    <g transform="rotate(99) scale(1.7) translate(-12,-12)">
+      <path fill="#ff5a3c" stroke="#ff5a3c" stroke-linejoin="round" stroke-width="1.2"
+        d="M12 2 L12.9 3 12.9 9 20.5 13.4 20.5 15.2 12.9 12.8 12.9 17.6 15 19.2 15 20.8 12 19.9 9 20.8 9 19.2 11.1 17.6 11.1 12.8 3.5 15.2 3.5 13.4 11.1 9 11.1 3 Z"/>
+    </g>
+  </g>
+
+  <!-- caption chip -->
+  <g transform="translate(70,268)">
+    <rect width="330" height="38" rx="10" fill="#ff5a3c" opacity=".95"/>
+    <text x="20" y="25" font-size="17" font-weight="600" fill="#ffffff">Lisbon&#160;&#160;&#8594;&#160;&#160;Tokyo&#160;&#160;&#183;&#160;&#160;Plane&#160;&#160;&#183;&#160;&#160;11 149 km</text>
+  </g>
+
+  <!-- title -->
+  <g transform="translate(690,84)">
+    <text font-size="58" font-weight="800" fill="#e6edf3" letter-spacing="-1">TripTrail</text>
+    <text y="40" font-size="21" fill="#8b97a7">Cinematic travel map animations, free in your browser</text>
+    <g transform="translate(2,72)" font-size="15.5" fill="#9aa6b7">
+      <text>Real sea &amp; road routes &#183; Globe mode &#183; MP4 export</text>
+      <text y="28">No API keys &#183; No watermark &#183; No limits</text>
+    </g>
+  </g>
+</svg>
