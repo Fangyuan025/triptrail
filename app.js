@@ -87,7 +87,7 @@ let stops = [
 
 /* ----------------------------- Settings ----------------------------- */
 const settings = {
-  style: 'https://tiles.versatiles.org/assets/styles/eclipse/style.json',
+  style: 'satellite',
   aspect: '16:9',
   accent: '#ff5a3c',
   globe: false,
@@ -117,6 +117,8 @@ const anim = {
   photo: null,
   photoLabel: '',
   photoAlpha: 0,
+  pulse: null,            // { lng, lat, start } arrival ripple
+  fullCoords: [],
   legs: [],
 };
 
@@ -356,10 +358,31 @@ function line(coords) { return { type: 'Feature', geometry: { type: 'LineString'
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
 /* ============================================================ map setup */
+// Free satellite imagery (Esri World Imagery) as a self-contained style spec,
+// with glyphs so our (compositor) labels aren't needed on the GL side.
+const SATELLITE_STYLE = {
+  version: 8,
+  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+  sources: {
+    satellite: {
+      type: 'raster',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+      tileSize: 256, maxzoom: 18,
+      attribution: 'Imagery © Esri, Maxar, Earthstar Geographics',
+    },
+  },
+  layers: [
+    { id: 'bg', type: 'background', paint: { 'background-color': '#06101f' } },
+    { id: 'satellite', type: 'raster', source: 'satellite', paint: { 'raster-fade-duration': 0 } },
+  ],
+};
+// Resolve a style menu value to a URL or an inline spec.
+function styleSpec(value) { return value === 'satellite' ? SATELLITE_STYLE : value; }
+
 function initMap() {
   map = new maplibregl.Map({
     container: 'map',
-    style: settings.style,
+    style: styleSpec(settings.style),
     center: [5, 44],
     zoom: 4,
     pitch: settings.pitch ? 50 : 0,
@@ -375,6 +398,23 @@ function initMap() {
 
 function applyProjection() {
   try { map.setProjection({ type: settings.globe ? 'globe' : 'mercator' }); } catch (e) { /* older browsers */ }
+  applySky();
+}
+
+// Subtle atmosphere so the globe (and tilted views) read as a lit planet.
+function applySky() {
+  try {
+    if (!map.setSky) return;
+    map.setSky({
+      'sky-color': '#0a1626',
+      'horizon-color': '#16324c',
+      'fog-color': '#0e1116',
+      'sky-horizon-blend': 0.6,
+      'horizon-fog-blend': 0.5,
+      'fog-ground-blend': 0.4,
+      'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.9, 4, 0.5, 6, 0.2, 8, 0],
+    });
+  } catch (e) { /* sky unsupported on this build */ }
 }
 
 // Resolves when the current viewport's tiles are in (or after a timeout).
@@ -393,33 +433,46 @@ function waitForTiles(timeoutMs = 5000) {
   });
 }
 
+// Route layers. The full journey lives in ONE `trail` source (set once) and is
+// revealed with a line-gradient — no per-frame geometry updates, which is the
+// key to flicker-free playback. Three stacked layers give a glowing path.
+const TRAIL_LAYERS = ['trail-glow', 'trail-casing', 'trail-core'];
 function addLayers() {
   const a = settings.accent;
-  const src = (sid) => { if (!map.getSource(sid)) map.addSource(sid, { type: 'geojson', data: EMPTY }); };
-  ['route-bg', 'route-done', 'route-active-solid', 'route-active-dash'].forEach(src);
+  if (!map.getSource('route-bg')) map.addSource('route-bg', { type: 'geojson', data: EMPTY });
+  if (!map.getSource('trail')) map.addSource('trail', { type: 'geojson', data: EMPTY, lineMetrics: true });
 
   const ensure = (lid, def) => { if (!map.getLayer(lid)) map.addLayer(def); };
 
-  if (settings.glow) {
-    ensure('route-done-glow', { id: 'route-done-glow', type: 'line', source: 'route-done',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': a, 'line-width': 11, 'line-opacity': 0.22, 'line-blur': 4 } });
-  }
+  // faint dashed plan of the whole route (edit mode only)
   ensure('route-bg', { id: 'route-bg', type: 'line', source: 'route-bg',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': '#9aa6b2', 'line-width': 2, 'line-opacity': 0.30, 'line-dasharray': [1.5, 2.5] } });
-  ensure('route-done', { id: 'route-done', type: 'line', source: 'route-done',
+    paint: { 'line-color': '#9aa6b2', 'line-width': 2, 'line-opacity': 0.28, 'line-dasharray': [1.5, 2.5] } });
+
+  if (settings.glow)
+    ensure('trail-glow', { id: 'trail-glow', type: 'line', source: 'trail',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': a, 'line-width': 14, 'line-opacity': 0.32, 'line-blur': 5 } });
+  ensure('trail-casing', { id: 'trail-casing', type: 'line', source: 'trail',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': a, 'line-width': 4 } });
-  ensure('route-active-solid', { id: 'route-active-solid', type: 'line', source: 'route-active-solid',
+    paint: { 'line-color': a, 'line-opacity': 0.5, 'line-width': 7.2, 'line-blur': 1.4 } });
+  ensure('trail-core', { id: 'trail-core', type: 'line', source: 'trail',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': a, 'line-width': 4.5 } });
-  ensure('route-active-dash', { id: 'route-active-dash', type: 'line', source: 'route-active-dash',
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': a, 'line-width': 4.5, 'line-dasharray': [0.4, 1.6] } });
+    paint: { 'line-color': a, 'line-opacity': 1, 'line-width': 4.2 } });
+
+  applySky();
 }
 
 function setSrc(sid, data) { const s = map.getSource(sid); if (s) s.setData(data); }
+
+// Reveal the trail up to `progress` (0..1 of total length) via a gradient step.
+function setTrailReveal(progress) {
+  const p = clamp(progress, 0.0001, 1);
+  const grad = ['step', ['line-progress'], settings.accent, p, 'rgba(0,0,0,0)'];
+  for (const id of TRAIL_LAYERS) {
+    try { if (map.getLayer(id)) map.setPaintProperty(id, 'line-gradient', grad); } catch (e) { /* layer not ready */ }
+  }
+}
 
 function refreshRoutePreview() {
   if (!map || !map.getSource('route-bg')) return;
@@ -702,6 +755,16 @@ async function precomputeLegs() {
     const cam = map.cameraForBounds(b, { padding: fitPadding(settings.aspect === '9:16' ? 120 : 90) });
     anim.legs.push({ from, to, mode: m, modeKey: to.mode, path, zoom: clamp((cam && cam.zoom ? cam.zoom : 5) + 0.15, 2, 11), dist: path.total });
   }
+  // full concatenated route + per-leg reveal fractions (by length)
+  anim.fullCoords = [];
+  let cum = 0;
+  const total = anim.legs.reduce((s, l) => s + l.path.total, 0) || 1;
+  for (const leg of anim.legs) {
+    leg.f0 = cum / total;
+    cum += leg.path.total;
+    leg.f1 = cum / total;
+    anim.fullCoords.push(...leg.path.coords);
+  }
 }
 
 /* ============================================================ tile prewarm */
@@ -751,16 +814,15 @@ async function play(record) {
   anim.playing = true;
   anim.recording = record;
   anim.reached = 0; anim.legIndex = -1; anim.marker = null;
-  anim.photo = null; anim.photoAlpha = 0;
+  anim.photo = null; anim.photoAlpha = 0; anim.pulse = null;
   const token = ++cancelToken;
   setControls(true);
 
-  // hide the not-yet-traveled preview line — the story reveals the route
-  setSrc('route-done', EMPTY); setSrc('route-active-solid', EMPTY); setSrc('route-active-dash', EMPTY);
+  // Load the full route once; the story reveals it via a gradient (no per-frame
+  // geometry churn). Hide the dashed plan while playing.
   setSrc('route-bg', EMPTY);
-
-  const doneCoords = [];
-  const pitch = settings.pitch ? 50 : 0;
+  setSrc('trail', line(anim.fullCoords));
+  setTrailReveal(0);
 
   // Sweep the route once so every tile is cached before a single frame is
   // recorded, then frame the overview and let it settle.
@@ -797,22 +859,18 @@ async function play(record) {
     anim.caption = `${leg.from.name}  →  ${leg.to.name}   ·   ${leg.mode.label}   ·   ${Math.round(leg.dist)} km`;
 
     anim.phase = 'pause';
-    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch }, 800, token);
+    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch: settings.pitch ? 40 : 0 }, 800, token);
     await waitForTiles(3500);           // let the leg's start view render fully
     await sleep(250);
 
     anim.phase = 'leg';
-    const dashId = leg.mode.dashed ? 'route-active-dash' : 'route-active-solid';
-    const otherId = leg.mode.dashed ? 'route-active-solid' : 'route-active-dash';
-    setSrc(otherId, EMPTY);
     const dur = clamp(2200 + leg.dist * 1.1, 2200, 7000) / settings.pace;
-    await animateLeg(leg, dashId, dur, pitch, token);
+    await animateLeg(leg, dur, token);
     if (token !== cancelToken) return;
 
-    doneCoords.push(...leg.path.coords);
-    setSrc('route-done', line(doneCoords));
-    setSrc('route-active-solid', EMPTY); setSrc('route-active-dash', EMPTY);
+    setTrailReveal(leg.f1);
     anim.reached = i + 2;
+    firePulse(leg.to);
 
     anim.phase = 'pause';
     await sleep(450);
@@ -840,29 +898,32 @@ async function showPhoto(stop, token) {
   anim.photo = null;
 }
 
-// Tile-aware leg animation: the camera slows down while tiles stream in, so
-// fast pans never outrun rendering. Braking is debounced (brief tile misses
-// during a pan are normal) and speed changes are low-pass filtered, so the
-// motion stays smooth instead of stuttering on every transient miss.
-function animateLeg(leg, dashId, durMs, pitch, token) {
+// Cinematic leg animation. The trail is revealed with a gradient (no geometry
+// churn); the camera looks slightly ahead of the vehicle and eases a gentle
+// pitch/zoom arc across the leg. Tile-aware braking keeps pans from outrunning
+// rendering, low-pass filtered so motion never stutters.
+function animateLeg(leg, durMs, token) {
   return new Promise(resolve => {
     let progress = 0, last = null, speed = 1, missingMs = 0;
+    const pMax = settings.pitch ? 55 : 11;
+    const pMin = settings.pitch ? 40 : 0;
     function step(now) {
       if (token !== cancelToken || !anim.playing) return resolve();
       if (last === null) last = now;
       const dt = clamp(now - last, 0, 100); last = now;
       if (map.areTilesLoaded()) missingMs = 0; else missingMs += dt;
-      // brake only after tiles have been missing for a noticeable stretch,
-      // and glide between speeds instead of jumping
       const target = missingMs > 250 ? 0.12 : 1;
       speed += (target - speed) * (target < speed ? 0.12 : 0.05);
       progress += dt * speed;
       const f = clamp(progress / durMs, 0, 1);
       const ef = easeInOut(f);
+      const wave = Math.sin(Math.PI * f);
       const { pos } = pointAt(leg.path, ef);
       anim.marker = pos;
-      setSrc(dashId, line(sliceTo(leg.path, ef)));
-      map.jumpTo({ center: pos, zoom: leg.zoom, pitch, bearing: 0 });
+      setTrailReveal(leg.f0 + (leg.f1 - leg.f0) * ef);
+      // camera: centre slightly ahead, dip pitch/zoom mid-leg for a flythrough feel
+      const lead = pointAt(leg.path, clamp(ef + 0.26 * wave, 0, 1)).pos;
+      map.jumpTo({ center: lead, zoom: leg.zoom + 0.4 * wave, pitch: pMin + (pMax - pMin) * wave, bearing: 0 });
       if (f < 1) tick(step); else resolve();
     }
     tick(step);
@@ -894,39 +955,68 @@ function fadeProp(key, to, durMs, token) {
 function endPlay() {
   loading(false);
   anim.playing = false; anim.phase = 'idle';
+  stopCompositor();
   if (anim.recording) stopRecorder();
   anim.recording = false;
-  anim.titleAlpha = 0; anim.caption = ''; anim.photo = null; anim.photoAlpha = 0;
+  anim.titleAlpha = 0; anim.caption = ''; anim.photo = null; anim.photoAlpha = 0; anim.pulse = null;
   stopMusic();
   map.setPixelRatio(basePixelRatio);
   $('#output').classList.remove('show');
   setControls(false);
+  setSrc('trail', EMPTY);
   refreshRoutePreview();
 }
 
+// arrival ripple, drawn by the compositor at a stop
+function firePulse(stop) { anim.pulse = { lng: stop.lng, lat: stop.lat, start: performance.now() }; }
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
 function stopPlay() { cancelToken++; endPlay(); }
 
-/* ============================================================ compositor */
+/* ============================================================ compositor
+   The overlay canvas is composited INSIDE the map's `render` event, so the
+   map bitmap we draw and the transform we project() with are always the same
+   frame — no stale reads, no swimming pins, no flicker. A background fill
+   makes it fully opaque so the live map underneath never shows through. */
+let compositeFn = null, compositorGen = 0;
+
+function styleBgColor() {
+  try {
+    const bg = (map.getStyle().layers || []).find(l => l.type === 'background');
+    const c = bg && bg.paint && bg.paint['background-color'];
+    if (typeof c === 'string') return c;
+  } catch (e) { /* ignore */ }
+  return '#0b0f14';
+}
+
 function startCompositor() {
   const out = $('#output');
-  const mc = map.getCanvas();
-  out.width = mc.width; out.height = mc.height;
   const ctx = out.getContext('2d');
+  const bg = styleBgColor();
 
-  function frame() {
-    if (!anim.playing) return;
-    map.triggerRepaint();
+  compositeFn = () => {
     const m = map.getCanvas();
     if (out.width !== m.width || out.height !== m.height) { out.width = m.width; out.height = m.height; }
     const dpr = m.width / m.clientWidth || 1;
-    ctx.clearRect(0, 0, out.width, out.height);
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, out.width, out.height);
     ctx.drawImage(m, 0, 0, out.width, out.height);
     drawScene(ctx, out.width, out.height, dpr);
-    tick(frame);
-  }
-  tick(frame);
+  };
+  map.on('render', compositeFn);
+
+  // Keep the map (and thus the compositor) painting even during still pauses,
+  // so title/photo/pulse fades stay smooth.
+  const gen = ++compositorGen;
+  const pump = () => { if (!anim.playing || gen !== compositorGen) return; map.triggerRepaint(); tick(pump); };
+  tick(pump);
+  compositeFn();
 
   if (anim.recording && document.hidden) toast('Keep this tab visible while recording for smooth video.');
+}
+
+function stopCompositor() {
+  compositorGen++;
+  if (compositeFn) { map.off('render', compositeFn); compositeFn = null; }
 }
 
 function project(lng, lat, dpr) { const p = map.project([lng, lat]); return [p.x * dpr, p.y * dpr]; }
@@ -974,6 +1064,18 @@ function drawScene(ctx, W, H, dpr) {
       ctx.fillText(st.name, lx + px, ly + (fs + py * 2) / 2);
     }
   });
+
+  // ---- arrival ripple ----
+  if (anim.pulse) {
+    const el = performance.now() - anim.pulse.start;
+    if (el > 1100) { anim.pulse = null; }
+    else if (!occludedByGlobe(anim.pulse.lng, anim.pulse.lat)) {
+      const eo = easeOutCubic(el / 1100);
+      const [px, py] = project(anim.pulse.lng, anim.pulse.lat, dpr);
+      ctx.beginPath(); ctx.arc(px, py, (9 + 42 * eo) * s, 0, Math.PI * 2);
+      ctx.strokeStyle = hexA(accent, 0.5 * (1 - eo)); ctx.lineWidth = 3 * s; ctx.stroke();
+    }
+  }
 
   // ---- moving transport marker (vector icon) ----
   if (anim.marker && anim.phase === 'leg') {
@@ -1215,17 +1317,15 @@ function wire() {
   $('#inp-accent').oninput = e => {
     settings.accent = e.target.value;
     document.documentElement.style.setProperty('--accent', settings.accent);
-    ['route-done', 'route-active-solid', 'route-active-dash', 'route-done-glow'].forEach(lid => {
-      if (map && map.getLayer(lid)) map.setPaintProperty(lid, 'line-color', settings.accent);
-    });
+    TRAIL_LAYERS.forEach(lid => { if (map && map.getLayer(lid)) map.setPaintProperty(lid, 'line-color', settings.accent); });
   };
-  $('#sel-style').onchange = e => { settings.style = e.target.value; map.setStyle(settings.style); };
+  $('#sel-style').onchange = e => { settings.style = e.target.value; map.setStyle(styleSpec(settings.style)); };
   $('#sel-aspect').onchange = e => { settings.aspect = e.target.value; layoutStage(); };
   $('#chk-globe').onchange = e => { settings.globe = e.target.checked; applyProjection(); };
   $('#chk-pitch').onchange = e => { settings.pitch = e.target.checked; map.easeTo({ pitch: settings.pitch ? 50 : 0, duration: 500 }); };
   $('#chk-labels').onchange = e => settings.labels = e.target.checked;
   $('#chk-roads').onchange = e => settings.roads = e.target.checked;
-  $('#chk-glow').onchange = e => { settings.glow = e.target.checked; if (map) map.setStyle(settings.style); };
+  $('#chk-glow').onchange = e => { settings.glow = e.target.checked; if (map) map.setStyle(styleSpec(settings.style)); };
   $('#rng-pace').oninput = e => {
     settings.pace = parseFloat(e.target.value);
     $('#pace-val').textContent = settings.pace < 0.8 ? 'Cinematic' : settings.pace > 1.4 ? 'Snappy' : 'Normal';
