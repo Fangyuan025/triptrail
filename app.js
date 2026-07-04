@@ -1236,12 +1236,30 @@ function wire() {
   document.addEventListener('click', e => {
     if (!e.target.closest('.search')) $('#search-results').classList.add('hidden');
   });
-  window.addEventListener('resize', layoutStage);
+
+  // collapsible sidebar + mobile overlay
+  const setNav = hidden => document.body.classList.toggle('nav-hidden', hidden);
+  $('#nav-toggle').onclick = () => document.body.classList.toggle('nav-hidden');
+  $('#nav-close').onclick = () => setNav(true);
+  $('#scrim').onclick = () => setNav(true);
+  // resize the map once the slide animation settles (stage width changed on desktop)
+  $('#sidebar').addEventListener('transitionend', e => {
+    if (e.propertyName === 'margin-left' || e.propertyName === 'transform') layoutStage();
+  });
+
+  // keep a sensible default when crossing the mobile breakpoint
+  const mq = window.matchMedia('(max-width:820px)');
+  let wasMobile = mq.matches;
+  window.addEventListener('resize', () => {
+    if (mq.matches !== wasMobile) { wasMobile = mq.matches; setNav(mq.matches); }
+    layoutStage();
+  });
 }
 
 /* ============================================================ boot */
 function boot() {
   document.documentElement.style.setProperty('--accent', settings.accent);
+  if (window.matchMedia('(max-width:820px)').matches) document.body.classList.add('nav-hidden');
   wire();
   renderStops();
   initMap();
