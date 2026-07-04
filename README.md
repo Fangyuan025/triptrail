@@ -14,10 +14,10 @@
 </p>
 
 <p align="center">
-  <img alt="deploy" src="https://img.shields.io/badge/deployed%20on-Vercel-000?logo=vercel"/>
-  <img alt="stack" src="https://img.shields.io/badge/vanilla%20JS-zero%20build-f7df1e?logo=javascript&logoColor=000"/>
-  <img alt="maplibre" src="https://img.shields.io/badge/MapLibre%20GL-v5-396CB2"/>
-  <img alt="license" src="https://img.shields.io/badge/license-MIT-green"/>
+  <a href="https://travel-map-animator.vercel.app"><img alt="deploy" src="https://img.shields.io/badge/deployed%20on-Vercel-000?logo=vercel"/></a>
+  <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"><img alt="stack" src="https://img.shields.io/badge/vanilla%20JS-zero%20build-f7df1e?logo=javascript&logoColor=000"/></a>
+  <a href="https://maplibre.org"><img alt="maplibre" src="https://img.shields.io/badge/MapLibre%20GL-v5-396CB2"/></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"/></a>
 </p>
 
 ---
