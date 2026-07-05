@@ -391,7 +391,7 @@ function initMap() {
     center: [5, 44],
     zoom: 4,
     pitch: settings.pitch ? 50 : 0,
-    preserveDrawingBuffer: true,
+    preserveDrawingBuffer: true,   // needed so recording can drawImage the map
     attributionControl: { compact: true },
     maxTileCacheSize: 4096,   // keep prewarmed route tiles in memory
   });
@@ -729,6 +729,18 @@ function samplePoints(pts, max) {
   return out;
 }
 
+// Uniformly reduce a coordinate list to at most `max` points (keeps endpoints).
+// The rendered trail must stay light — a 50k-vertex line re-projected every
+// frame (esp. on globe) drops playback to a slideshow.
+function decimate(coords, max) {
+  if (coords.length <= max) return coords;
+  const out = [coords[0]];
+  const step = (coords.length - 1) / (max - 1);
+  for (let i = 1; i < max - 1; i++) out.push(coords[Math.round(i * step)]);
+  out.push(coords[coords.length - 1]);
+  return out;
+}
+
 /* ============================================================ precompute legs */
 async function precomputeLegs() {
   anim.legs = [];
@@ -766,15 +778,21 @@ async function precomputeLegs() {
   // MapLibre's line-progress, so the gradient head and the icon stay locked
   // together regardless of latitude.
   anim.fullCoords = [];
-  const legStart = [];
-  for (const leg of anim.legs) { legStart.push(anim.fullCoords.length); anim.fullCoords.push(...leg.path.coords); }
+  const legStart = [], legLen = [];
+  const maxPerLeg = clamp(Math.floor(2200 / anim.legs.length), 80, 600);
+  for (const leg of anim.legs) {
+    const dc = decimate(leg.path.coords, maxPerLeg);
+    legStart.push(anim.fullCoords.length);
+    legLen.push(dc.length);
+    anim.fullCoords.push(...dc);
+  }
   const merc = anim.fullCoords.map(c => { const m = maplibregl.MercatorCoordinate.fromLngLat([c[0], c[1]]); return [m.x, m.y]; });
   const mcum = [0];
   for (let i = 1; i < merc.length; i++) mcum.push(mcum[i - 1] + Math.hypot(merc[i][0] - merc[i - 1][0], merc[i][1] - merc[i - 1][1]));
   anim.mcum = mcum;
   anim.mtotal = mcum[mcum.length - 1] || 1;
   anim.legs.forEach((leg, k) => {
-    const s = legStart[k], e = s + leg.path.coords.length - 1;
+    const s = legStart[k], e = s + legLen[k] - 1;
     leg.pf0 = mcum[s] / anim.mtotal;
     leg.pf1 = mcum[e] / anim.mtotal;
   });
@@ -812,7 +830,7 @@ async function prewarmTiles(token) {
     for (let j = 0; j <= steps; j++) {
       if (token !== cancelToken) return;
       const { pos } = pointAt(leg.path, j / steps);
-      map.jumpTo({ center: pos, zoom: leg.zoom, pitch: settings.pitch ? 40 : 0, bearing: 0 });
+      map.jumpTo({ center: pos, zoom: leg.zoom, pitch: settings.globe ? 0 : (settings.pitch ? 22 : 8), bearing: 0 });
       await waitForTiles(700);
       done++;
       loading(true, `Caching map along route… ${Math.round(done / total * 100)}%`);
@@ -827,10 +845,14 @@ async function play(record) {
   syncSettingsFromUI();
 
   loading(true, 'Plotting your route…');
-  if (record && settings.quality > 1) {
-    map.setPixelRatio(Math.max(basePixelRatio, 1) * settings.quality);
-    await sleep(250);
+  // Preview renders at 1x for smoothness (fill-rate is what raster/retina pay for);
+  // recording keeps full resolution (×quality) since it's a one-time export.
+  if (record) {
+    if (settings.quality > 1) map.setPixelRatio(Math.max(basePixelRatio, 1) * settings.quality);
+  } else {
+    map.setPixelRatio(1);
   }
+  await sleep(200);
   await precomputeLegs();
   await preloadIcons(Object.keys(MODES), settings.accent);
   loading(false);
@@ -886,7 +908,7 @@ async function play(record) {
     anim.caption = `${leg.from.name}  →  ${leg.to.name}   ·   ${leg.mode.label}   ·   ${Math.round(leg.dist)} km`;
 
     anim.phase = 'pause';
-    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch: settings.pitch ? 32 : 0 }, 800, token);
+    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch: settings.globe ? 0 : (settings.pitch ? 14 : 0) }, 800, token);
     await waitForTiles(3500);           // let the leg's start view render fully
     await sleep(250);
 
@@ -933,7 +955,10 @@ async function showPhoto(stop, token) {
 function animateLeg(leg, durMs, token) {
   return new Promise(resolve => {
     const t0 = performance.now();
-    const pMax = settings.pitch ? 48 : 6, pMin = settings.pitch ? 32 : 0;
+    // Keep pitch gentle — steep pitch on satellite drags in blurry horizon
+    // tiles and looks bad; on the globe, no pitch at all (it distorts badly).
+    const pMax = settings.globe ? 0 : (settings.pitch ? 22 : 8);
+    const pMin = settings.globe ? 0 : (settings.pitch ? 14 : 0);
     const span = leg.pf1 - leg.pf0;
     function step(now) {
       if (token !== cancelToken || !anim.playing) return resolve();
@@ -944,7 +969,8 @@ function animateLeg(leg, durMs, token) {
       anim.marker = trailPointAt(frac);
       setTrailReveal(frac);
       const leadFrac = clamp(frac + 0.22 * wave * span, 0, 1);
-      map.jumpTo({ center: trailPointAt(leadFrac), zoom: leg.zoom, pitch: pMin + (pMax - pMin) * wave, bearing: 0 });
+      // gently zoom OUT mid-leg — shows context and reuses coarser cached tiles
+      map.jumpTo({ center: trailPointAt(leadFrac), zoom: leg.zoom - 0.45 * wave, pitch: pMin + (pMax - pMin) * wave, bearing: 0 });
       if (f < 1) tick(step); else resolve();
     }
     tick(step);
@@ -1348,9 +1374,27 @@ function wire() {
     document.documentElement.style.setProperty('--accent', settings.accent);
     TRAIL_LAYERS.forEach(lid => { if (map && map.getLayer(lid)) map.setPaintProperty(lid, 'line-color', settings.accent); });
   };
-  $('#sel-style').onchange = e => { settings.style = e.target.value; map.setStyle(styleSpec(settings.style), { diff: false }); };
+  $('#sel-style').onchange = e => {
+    settings.style = e.target.value;
+    // Raster satellite reprojected onto the globe renders at ~1fps; keep it flat.
+    if (settings.style === 'satellite' && settings.globe) {
+      settings.globe = false; $('#chk-globe').checked = false; applyProjection();
+      toast('Satellite runs flat — globe needs a vector style.');
+    }
+    map.setStyle(styleSpec(settings.style), { diff: false });
+  };
   $('#sel-aspect').onchange = e => { settings.aspect = e.target.value; layoutStage(); };
-  $('#chk-globe').onchange = e => { settings.globe = e.target.checked; applyProjection(); };
+  $('#chk-globe').onchange = e => {
+    settings.globe = e.target.checked;
+    // Satellite (raster) on the globe is unusably slow — fall back to a vector style.
+    if (settings.globe && settings.style === 'satellite') {
+      settings.style = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+      $('#sel-style').value = settings.style;
+      map.setStyle(styleSpec(settings.style), { diff: false });
+      toast('Globe needs a vector style — switched to Voyager.');
+    }
+    applyProjection();
+  };
   $('#chk-pitch').onchange = e => { settings.pitch = e.target.checked; map.easeTo({ pitch: settings.pitch ? 50 : 0, duration: 500 }); };
   $('#chk-labels').onchange = e => settings.labels = e.target.checked;
   $('#chk-roads').onchange = e => settings.roads = e.target.checked;
