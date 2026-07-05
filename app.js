@@ -380,9 +380,14 @@ const SATELLITE_STYLE = {
 function styleSpec(value) { return value === 'satellite' ? SATELLITE_STYLE : value; }
 
 function initMap() {
+  const initial = styleSpec(settings.style);
+  const inline = typeof initial !== 'string';
   map = new maplibregl.Map({
     container: 'map',
-    style: styleSpec(settings.style),
+    // An inline style object passed to the constructor can silently fail to
+    // fire `load` in this build, so start from a trivial style that always
+    // loads and swap to the real one below.
+    style: inline ? { version: 8, sources: {}, layers: [] } : initial,
     center: [5, 44],
     zoom: 4,
     pitch: settings.pitch ? 50 : 0,
@@ -391,9 +396,11 @@ function initMap() {
     maxTileCacheSize: 4096,   // keep prewarmed route tiles in memory
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
-  map.on('load', () => { applyProjection(); addLayers(); refreshRoutePreview(); fitToStops(true); });
-  map.on('style.load', () => { applyProjection(); addLayers(); refreshRoutePreview(); });
+  // style.load fires for every style (initial + each switch) — always (re)add our layers
+  map.on('style.load', () => { applyProjection(); addLayers(); refreshRoutePreview(); fitToStops(true); });
   map.on('click', (e) => addStopAt(e.lngLat.lng, e.lngLat.lat));
+  // diff:false forces a full (re)load so style.load fires and our layers re-add
+  if (inline) map.once('load', () => map.setStyle(initial, { diff: false }));
 }
 
 function applyProjection() {
@@ -755,16 +762,33 @@ async function precomputeLegs() {
     const cam = map.cameraForBounds(b, { padding: fitPadding(settings.aspect === '9:16' ? 120 : 90) });
     anim.legs.push({ from, to, mode: m, modeKey: to.mode, path, zoom: clamp((cam && cam.zoom ? cam.zoom : 5) + 0.15, 2, 11), dist: path.total });
   }
-  // full concatenated route + per-leg reveal fractions (by length)
+  // Full concatenated route. Reveal fractions use the SAME Mercator metric as
+  // MapLibre's line-progress, so the gradient head and the icon stay locked
+  // together regardless of latitude.
   anim.fullCoords = [];
-  let cum = 0;
-  const total = anim.legs.reduce((s, l) => s + l.path.total, 0) || 1;
-  for (const leg of anim.legs) {
-    leg.f0 = cum / total;
-    cum += leg.path.total;
-    leg.f1 = cum / total;
-    anim.fullCoords.push(...leg.path.coords);
-  }
+  const legStart = [];
+  for (const leg of anim.legs) { legStart.push(anim.fullCoords.length); anim.fullCoords.push(...leg.path.coords); }
+  const merc = anim.fullCoords.map(c => { const m = maplibregl.MercatorCoordinate.fromLngLat([c[0], c[1]]); return [m.x, m.y]; });
+  const mcum = [0];
+  for (let i = 1; i < merc.length; i++) mcum.push(mcum[i - 1] + Math.hypot(merc[i][0] - merc[i - 1][0], merc[i][1] - merc[i - 1][1]));
+  anim.mcum = mcum;
+  anim.mtotal = mcum[mcum.length - 1] || 1;
+  anim.legs.forEach((leg, k) => {
+    const s = legStart[k], e = s + leg.path.coords.length - 1;
+    leg.pf0 = mcum[s] / anim.mtotal;
+    leg.pf1 = mcum[e] / anim.mtotal;
+  });
+}
+
+// Point at a global Mercator fraction of the full trail — matches line-progress,
+// so the icon sits exactly on the revealed head.
+function trailPointAt(frac) {
+  const cum = anim.mcum, d = clamp(frac, 0, 1) * anim.mtotal;
+  let lo = 1, hi = cum.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cum[mid] < d) lo = mid + 1; else hi = mid; }
+  const seg = cum[lo] - cum[lo - 1] || 1, t = (d - cum[lo - 1]) / seg;
+  const a = anim.fullCoords[lo - 1], b = anim.fullCoords[lo];
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 }
 
 /* ============================================================ tile prewarm */
@@ -779,7 +803,7 @@ async function prewarmTiles(token) {
     // km covered by one viewport width at this leg's zoom (web-mercator approx)
     const midLat = leg.path.coords[Math.floor(leg.path.coords.length / 2)][1];
     const kmPerScreen = 40075 * Math.cos(midLat * Math.PI / 180) / Math.pow(2, leg.zoom) * (c.clientWidth / 512);
-    const steps = clamp(Math.ceil(leg.path.total / (kmPerScreen * 0.55)), 1, 36);
+    const steps = clamp(Math.ceil(leg.path.total / (kmPerScreen * 0.9)), 1, 14);
     plan.push({ leg, steps });
   }
   const total = plan.reduce((s, p) => s + p.steps + 1, 0);
@@ -788,8 +812,8 @@ async function prewarmTiles(token) {
     for (let j = 0; j <= steps; j++) {
       if (token !== cancelToken) return;
       const { pos } = pointAt(leg.path, j / steps);
-      map.jumpTo({ center: pos, zoom: leg.zoom, bearing: 0 });
-      await waitForTiles(1800);
+      map.jumpTo({ center: pos, zoom: leg.zoom, pitch: settings.pitch ? 40 : 0, bearing: 0 });
+      await waitForTiles(700);
       done++;
       loading(true, `Caching map along route… ${Math.round(done / total * 100)}%`);
     }
@@ -824,14 +848,17 @@ async function play(record) {
   setSrc('trail', line(anim.fullCoords));
   setTrailReveal(0);
 
-  // Sweep the route once so every tile is cached before a single frame is
-  // recorded, then frame the overview and let it settle.
-  loading(true, 'Caching map along route… 0%');
-  await prewarmTiles(token);
-  if (token !== cancelToken) { loading(false); return; }
+  // For recording, sweep the route once so tiles are cached and the export is
+  // pristine. Preview skips this — motion is constant-speed and tiles pop in
+  // cleanly (raster-fade-duration 0), so playback starts immediately.
+  if (record) {
+    loading(true, 'Caching map along route… 0%');
+    await prewarmTiles(token);
+    if (token !== cancelToken) { loading(false); return; }
+  }
   fitToStops(true);
   loading(true, 'Loading overview…');
-  await waitForTiles(6000);
+  await waitForTiles(record ? 6000 : 2500);
   loading(false);
   if (token !== cancelToken) return;
 
@@ -859,7 +886,7 @@ async function play(record) {
     anim.caption = `${leg.from.name}  →  ${leg.to.name}   ·   ${leg.mode.label}   ·   ${Math.round(leg.dist)} km`;
 
     anim.phase = 'pause';
-    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch: settings.pitch ? 40 : 0 }, 800, token);
+    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch: settings.pitch ? 32 : 0 }, 800, token);
     await waitForTiles(3500);           // let the leg's start view render fully
     await sleep(250);
 
@@ -868,7 +895,7 @@ async function play(record) {
     await animateLeg(leg, dur, token);
     if (token !== cancelToken) return;
 
-    setTrailReveal(leg.f1);
+    setTrailReveal(leg.pf1);
     anim.reached = i + 2;
     firePulse(leg.to);
 
@@ -898,32 +925,26 @@ async function showPhoto(stop, token) {
   anim.photo = null;
 }
 
-// Cinematic leg animation. The trail is revealed with a gradient (no geometry
-// churn); the camera looks slightly ahead of the vehicle and eases a gentle
-// pitch/zoom arc across the leg. Tile-aware braking keeps pans from outrunning
-// rendering, low-pass filtered so motion never stutters.
+// Cinematic leg animation. Constant wall-clock speed (no tile-braking, which
+// oscillated and read as stutter) — prewarmed tiles just pop in. The icon and
+// the gradient head are driven from the same Mercator fraction so they never
+// separate. Zoom stays fixed per leg (no mid-leg zoom-in that would fetch new
+// tiles); only a gentle pitch and forward look-ahead add motion.
 function animateLeg(leg, durMs, token) {
   return new Promise(resolve => {
-    let progress = 0, last = null, speed = 1, missingMs = 0;
-    const pMax = settings.pitch ? 55 : 11;
-    const pMin = settings.pitch ? 40 : 0;
+    const t0 = performance.now();
+    const pMax = settings.pitch ? 48 : 6, pMin = settings.pitch ? 32 : 0;
+    const span = leg.pf1 - leg.pf0;
     function step(now) {
       if (token !== cancelToken || !anim.playing) return resolve();
-      if (last === null) last = now;
-      const dt = clamp(now - last, 0, 100); last = now;
-      if (map.areTilesLoaded()) missingMs = 0; else missingMs += dt;
-      const target = missingMs > 250 ? 0.12 : 1;
-      speed += (target - speed) * (target < speed ? 0.12 : 0.05);
-      progress += dt * speed;
-      const f = clamp(progress / durMs, 0, 1);
+      const f = clamp((now - t0) / durMs, 0, 1);
       const ef = easeInOut(f);
       const wave = Math.sin(Math.PI * f);
-      const { pos } = pointAt(leg.path, ef);
-      anim.marker = pos;
-      setTrailReveal(leg.f0 + (leg.f1 - leg.f0) * ef);
-      // camera: centre slightly ahead, dip pitch/zoom mid-leg for a flythrough feel
-      const lead = pointAt(leg.path, clamp(ef + 0.26 * wave, 0, 1)).pos;
-      map.jumpTo({ center: lead, zoom: leg.zoom + 0.4 * wave, pitch: pMin + (pMax - pMin) * wave, bearing: 0 });
+      const frac = leg.pf0 + span * ef;
+      anim.marker = trailPointAt(frac);
+      setTrailReveal(frac);
+      const leadFrac = clamp(frac + 0.22 * wave * span, 0, 1);
+      map.jumpTo({ center: trailPointAt(leadFrac), zoom: leg.zoom, pitch: pMin + (pMax - pMin) * wave, bearing: 0 });
       if (f < 1) tick(step); else resolve();
     }
     tick(step);
@@ -1319,13 +1340,13 @@ function wire() {
     document.documentElement.style.setProperty('--accent', settings.accent);
     TRAIL_LAYERS.forEach(lid => { if (map && map.getLayer(lid)) map.setPaintProperty(lid, 'line-color', settings.accent); });
   };
-  $('#sel-style').onchange = e => { settings.style = e.target.value; map.setStyle(styleSpec(settings.style)); };
+  $('#sel-style').onchange = e => { settings.style = e.target.value; map.setStyle(styleSpec(settings.style), { diff: false }); };
   $('#sel-aspect').onchange = e => { settings.aspect = e.target.value; layoutStage(); };
   $('#chk-globe').onchange = e => { settings.globe = e.target.checked; applyProjection(); };
   $('#chk-pitch').onchange = e => { settings.pitch = e.target.checked; map.easeTo({ pitch: settings.pitch ? 50 : 0, duration: 500 }); };
   $('#chk-labels').onchange = e => settings.labels = e.target.checked;
   $('#chk-roads').onchange = e => settings.roads = e.target.checked;
-  $('#chk-glow').onchange = e => { settings.glow = e.target.checked; if (map) map.setStyle(styleSpec(settings.style)); };
+  $('#chk-glow').onchange = e => { settings.glow = e.target.checked; if (map) map.setStyle(styleSpec(settings.style), { diff: false }); };
   $('#rng-pace').oninput = e => {
     settings.pace = parseFloat(e.target.value);
     $('#pace-val').textContent = settings.pace < 0.8 ? 'Cinematic' : settings.pace > 1.4 ? 'Snappy' : 'Normal';
