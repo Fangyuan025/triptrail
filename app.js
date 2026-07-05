@@ -995,10 +995,14 @@ function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
 function stopPlay() { cancelToken++; endPlay(); }
 
 /* ============================================================ compositor
-   The overlay canvas is composited INSIDE the map's `render` event, so the
-   map bitmap we draw and the transform we project() with are always the same
-   frame — no stale reads, no swimming pins, no flicker. A background fill
-   makes it fully opaque so the live map underneath never shows through. */
+   The overlay canvas draws pins, marker, labels and chrome, composited inside
+   the map's `render` event so overlays and the map transform share one frame.
+
+   PREVIEW: the overlay is transparent — we DON'T copy the map into it. The live
+   WebGL map is shown directly underneath, so tiles render natively with no
+   re-sampling (copying the tile buffer every frame was the tile-flicker cause).
+   RECORD: we bake the map (fill + drawImage) so the single recorded canvas
+   carries everything. */
 let compositeFn = null, compositorGen = 0;
 
 function styleBgColor() {
@@ -1019,8 +1023,12 @@ function startCompositor() {
     const m = map.getCanvas();
     if (out.width !== m.width || out.height !== m.height) { out.width = m.width; out.height = m.height; }
     const dpr = m.width / m.clientWidth || 1;
-    ctx.fillStyle = bg; ctx.fillRect(0, 0, out.width, out.height);
-    ctx.drawImage(m, 0, 0, out.width, out.height);
+    if (anim.recording) {
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(m, 0, 0, out.width, out.height);
+    } else {
+      ctx.clearRect(0, 0, out.width, out.height);   // transparent → live map shows through
+    }
     drawScene(ctx, out.width, out.height, dpr);
   };
   map.on('render', compositeFn);
