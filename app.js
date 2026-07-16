@@ -1022,11 +1022,40 @@ function loadMuxer() {
   return muxerModPromise;
 }
 
+// Decode the music file, loop/trim it to the video length with a closing
+// fade, and return a 44.1kHz stereo AudioBuffer ready for AAC encoding.
+async function prepareOfflineAudio(totalMs) {
+  const el = $('#music');
+  if (!el.src) return null;
+  if (typeof AudioEncoder === 'undefined') throw new Error('no AudioEncoder');
+  const sup = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 44100, numberOfChannels: 2, bitrate: 160_000 });
+  if (!sup.supported) throw new Error('AAC encode unsupported');
+  const durS = totalMs / 1000;
+  const raw = await fetch(el.src).then(r => r.arrayBuffer());
+  const actx = new OfflineAudioContext(2, Math.ceil(durS * 44100), 44100);
+  const buf = await actx.decodeAudioData(raw);
+  const src = actx.createBufferSource();
+  src.buffer = buf; src.loop = true;
+  const gain = actx.createGain();
+  gain.gain.setValueAtTime(1, 0);
+  gain.gain.setValueAtTime(1, Math.max(0, durS - 1));
+  gain.gain.linearRampToValueAtTime(0, durS);
+  src.connect(gain); gain.connect(actx.destination);
+  src.start(0);
+  return actx.startRendering();
+}
+
 async function renderOffline(tl, token) {
   let mux;
   try {
     mux = await loadMuxer();
   } catch (e) { console.warn('offline export unavailable (muxer):', e); return null; }
+
+  // music: prepared offline and muxed as AAC — if that fails, fall back to
+  // realtime capture (which records the audible track)
+  let audioBuf = null;
+  try { audioBuf = await prepareOfflineAudio(tl.total); }
+  catch (e) { console.warn('offline audio unavailable, falling back to realtime:', e); return null; }
 
   const out = $('#output');
   const fps = settings.quality > 1 ? 60 : 30;
@@ -1045,6 +1074,7 @@ async function renderOffline(tl, token) {
   const muxer = new mux.Muxer({
     target: new mux.ArrayBufferTarget(),
     video: { codec: 'avc', width: W, height: H },
+    audio: audioBuf ? { codec: 'aac', sampleRate: 44100, numberOfChannels: 2 } : undefined,
     fastStart: 'in-memory',
   });
   let encErr = null;
@@ -1063,6 +1093,28 @@ async function renderOffline(tl, token) {
     } catch (e) { /* try next */ }
   }
   if (!configured) { console.warn('offline export unavailable: no supported encoder config'); return null; }
+
+  // encode the whole audio track up front (fast, pure CPU)
+  if (audioBuf) {
+    const aenc = new AudioEncoder({
+      output: (chunk, meta) => { try { muxer.addAudioChunk(chunk, meta); } catch (e) { encErr = e; } },
+      error: e => { encErr = e; },
+    });
+    aenc.configure({ codec: 'mp4a.40.2', sampleRate: 44100, numberOfChannels: 2, bitrate: 160_000 });
+    const ch0 = audioBuf.getChannelData(0);
+    const ch1 = audioBuf.numberOfChannels > 1 ? audioBuf.getChannelData(1) : ch0;
+    const CHUNK = 4410; // 100ms
+    for (let off = 0; off < audioBuf.length; off += CHUNK) {
+      const n = Math.min(CHUNK, audioBuf.length - off);
+      const data = new Float32Array(n * 2);
+      data.set(ch0.subarray(off, off + n), 0);
+      data.set(ch1.subarray(off, off + n), n);
+      const ad = new AudioData({ format: 'f32-planar', sampleRate: 44100, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round(off / 44100 * 1e6), data });
+      aenc.encode(ad); ad.close();
+    }
+    await aenc.flush();
+    if (encErr) { console.warn('offline audio encode failed:', encErr); try { encoder.close(); } catch (e) {} return null; }
+  }
 
   const frames = Math.ceil(tl.total / 1000 * fps);
   const frameUs = Math.round(1e6 / fps);
@@ -1147,9 +1199,9 @@ async function play(record) {
   $('#output').classList.add('show');
   startCompositor();
 
-  // Offline (deterministic, constant-fps) export whenever possible: MP4 without
-  // a music track. Music or WebM falls back to realtime capture.
-  const offline = record && settings.format === 'mp4' && !$('#music').src && typeof VideoEncoder !== 'undefined';
+  // Offline (deterministic, constant-fps) export whenever possible — music is
+  // decoded and muxed as AAC. WebM or missing WebCodecs falls back to realtime.
+  const offline = record && settings.format === 'mp4' && typeof VideoEncoder !== 'undefined';
   if (offline) {
     let blob = null;
     try { blob = await renderOffline(tl, token); }
