@@ -29,7 +29,8 @@
 </p>
 
 <p align="center">
-  <a href="assets/demo.mp4"><b>▶&nbsp;&nbsp;Watch the full demo video</b></a> — a 17-stop round-the-world trip, rendered offline at constant fps by the in-browser engine (1080p60 source).
+  <a href="https://github.com/Fangyuan025/triptrail/releases/download/v1.0.0/triptrail-demo-1080p60.mp4"><b>▶&nbsp;&nbsp;Watch the full demo video (original 1080p60)</b></a><br/>
+  A 17-stop round-the-world trip, rendered offline at constant 60 fps by the in-browser engine itself.
 </p>
 
 ## ✨ Features
