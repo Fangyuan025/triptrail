@@ -955,11 +955,13 @@ function paintFrame(tl, tMs) {
     const brg = bearingDeg(anim.marker, ahead);
     if (entered || anim.heading == null) anim.heading = brg;
     else anim.heading += (((brg - anim.heading + 540) % 360) - 180) * 0.25;
+    anim.alt = wave;   // simulated altitude: 0 at take-off/landing, 1 at cruise
     const lead = trailPointAt(clamp(frac + 0.2 * wave * span, 0, 1));
     cam = { center: lead, zoom: leg.zoom - 0.4 * wave, pitch: seg.pitchCruise + (seg.pitchMax - seg.pitchCruise) * wave };
   } else if (seg.type === 'arrival') {
     const leg = anim.legs[seg.leg];
     anim.phase = 'pause'; anim.caption = seg.caption; anim.legIndex = seg.leg;
+    anim.alt = 0;
     setTrailReveal(leg.pf1);
     anim.marker = trailPointAt(leg.pf1); anim.markerMode = leg.modeKey;
     anim.pulse = { lng: leg.to.lng, lat: leg.to.lat, k: easeOutCubic(lt) };
@@ -1346,26 +1348,40 @@ function drawScene(ctx, W, H, dpr) {
     ctx.strokeStyle = hexA(accent, 0.5 * (1 - eo)); ctx.lineWidth = 3 * s; ctx.stroke();
   }
 
-  // ---- moving transport marker (vector icon, rotates with heading) ----
+  // ---- moving transport marker: badge-free sticker with a cast shadow.
+  // The plane flies "in 3D": it grows with simulated altitude while its
+  // shadow drops away, spreads and fades — ground vehicles keep a tight
+  // grounded shadow. A white sticker outline keeps every glyph readable
+  // on any basemap (mult.dev-style). ----
   if (anim.marker && (anim.phase === 'leg' || anim.phase === 'pause')) {
     const [x, y] = project(anim.marker[0], anim.marker[1], dpr);
-    const r = 17 * s;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff'; ctx.fill();
-    ctx.lineWidth = 3 * s; ctx.strokeStyle = accent; ctx.stroke();
-    const ic = iconImage(anim.markerMode, accent);
-    if (ic.complete && ic.naturalWidth) {
-      const side = r * 1.24;
-      const rot = (MODES[anim.markerMode] || {}).directional && anim.heading != null && anim.phase === 'leg';
-      if (rot) {
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(anim.heading * Math.PI / 180);
-        ctx.drawImage(ic, -side / 2, -side / 2, side, side);
-        ctx.restore();
-      } else {
-        ctx.drawImage(ic, x - side / 2, y - side / 2, side, side);
+    const mode = MODES[anim.markerMode] || {};
+    const alt = mode.directional ? (anim.alt || 0) : 0;
+    const side = (mode.directional ? 34 : 29) * s * (1 + 0.45 * alt);
+    const rot = mode.directional && anim.heading != null ? anim.heading * Math.PI / 180 : 0;
+    const icon = iconImage(anim.markerMode, accent);
+    const white = iconImage(anim.markerMode, '#ffffff');
+    const shade = iconImage(anim.markerMode, '#000000');
+    if (icon.complete && icon.naturalWidth && white.complete && shade.complete) {
+      // cast shadow: separates, blurs and fades as the plane climbs
+      const drop = (3 + 15 * alt) * s;
+      ctx.save();
+      ctx.translate(x + drop * 0.45, y + drop);
+      ctx.rotate(rot);
+      ctx.globalAlpha = 0.34 - 0.18 * alt;
+      ctx.filter = `blur(${(1.5 + 3.5 * alt) * s}px)`;
+      ctx.drawImage(shade, -side / 2, -side / 2, side, side);
+      ctx.restore();
+      // sticker: white outline ring + colored glyph
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+      const o = 2.4 * s;
+      for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o], [-o, -o], [o, -o], [-o, o], [o, o]]) {
+        ctx.drawImage(white, -side / 2 + dx, -side / 2 + dy, side, side);
       }
+      ctx.drawImage(icon, -side / 2, -side / 2, side, side);
+      ctx.restore();
     }
   }
 
