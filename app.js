@@ -52,7 +52,7 @@ function preloadIcons(names, color) {
    use it too, just with a longer range), 'sea' follows real shipping lanes,
    'air' always flies a great circle / arc. */
 const MODES = {
-  plane:      { label: 'Plane',        dashed: true,  route: 'air',                bend: 0.18 },
+  plane:      { label: 'Plane',        dashed: true,  route: 'air',                bend: 0.18, directional: true },
   car:        { label: 'Car',          dashed: false, route: 'osrm', maxKm: 1500,  bend: 0.07 },
   train:      { label: 'Train',        dashed: true,  route: 'osrm', maxKm: 3000,  bend: 0.05 },
   bus:        { label: 'Bus',          dashed: false, route: 'osrm', maxKm: 1500,  bend: 0.07 },
@@ -396,8 +396,13 @@ function initMap() {
     maxTileCacheSize: 4096,   // keep prewarmed route tiles in memory
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
-  // style.load fires for every style (initial + each switch) — always (re)add our layers
-  map.on('style.load', () => { applyProjection(); addLayers(); refreshRoutePreview(); fitToStops(true); });
+  // style.load fires for every style (initial + each switch) — always (re)add
+  // our layers; if the style reports "not done loading", retry on styledata.
+  const ensureLayers = () => {
+    try { applyProjection(); addLayers(); refreshRoutePreview(); }
+    catch (e) { map.once('styledata', ensureLayers); }
+  };
+  map.on('style.load', () => { ensureLayers(); fitToStops(true); });
   map.on('click', (e) => addStopAt(e.lngLat.lng, e.lngLat.lat));
   // diff:false forces a full (re)load so style.load fires and our layers re-add
   if (inline) map.once('load', () => map.setStyle(initial, { diff: false }));
@@ -839,14 +844,273 @@ async function prewarmTiles(token) {
 }
 
 /* ============================================================ animation timeline */
+/* ---------------------------------------------------------------
+   Time-driven timeline (mult.dev-style engine).
+   The whole story is a pure function of elapsed time: paintFrame(t) sets the
+   camera, trail reveal, marker, pulse, title/photo/caption — nothing sleeps,
+   nothing eases via the map. Preview drives it with rAF at wall-clock speed;
+   export steps it frame-by-frame and encodes offline at constant fps, so the
+   video is perfectly smooth no matter how fast the machine renders. */
+
+function bearingDeg(a, b) {
+  const toR = Math.PI / 180;
+  const la1 = a[1] * toR, la2 = b[1] * toR, dl = (b[0] - a[0]) * toR;
+  const y = Math.sin(dl) * Math.cos(la2);
+  const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dl);
+  return Math.atan2(y, x) / toR;
+}
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+// spherical interpolation of a [lng,lat] pair (shortest arc, wrap-safe)
+function slerpLL(a, b, t) {
+  const toR = Math.PI / 180, toD = 180 / Math.PI;
+  const v = p => { const la = p[1] * toR, lo = p[0] * toR; return [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)]; };
+  const p0 = v(a), p1 = v(b);
+  const th = Math.acos(clamp(p0[0] * p1[0] + p0[1] * p1[1] + p0[2] * p1[2], -1, 1));
+  if (th < 1e-5) return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  const s = Math.sin(th), w0 = Math.sin((1 - t) * th) / s, w1 = Math.sin(t * th) / s;
+  const x = w0 * p0[0] + w1 * p1[0], y = w0 * p0[1] + w1 * p1[1], z = w0 * p0[2] + w1 * p1[2];
+  return [Math.atan2(y, x) * toD, Math.atan2(z, Math.hypot(x, y)) * toD];
+}
+
+function interpCam(a, b, t) {
+  const e = easeInOut(t);
+  return { center: slerpLL(a.center, b.center, e), zoom: a.zoom + (b.zoom - a.zoom) * e, pitch: a.pitch + (b.pitch - a.pitch) * e };
+}
+
+function overviewCam() {
+  const b = new maplibregl.LngLatBounds();
+  anim.fullCoords.forEach(c => b.extend(c));
+  const cf = map.cameraForBounds(b, { padding: fitPadding(90) });
+  if (cf && cf.center) {
+    const c = maplibregl.LngLat.convert(cf.center);
+    return { center: [c.lng, c.lat], zoom: cf.zoom, pitch: 0 };
+  }
+  const c = map.getCenter();
+  return { center: [c.lng, c.lat], zoom: map.getZoom(), pitch: 0 };
+}
+
+function buildTimeline() {
+  const p = settings.pace;
+  const pitchCruise = settings.globe ? 0 : (settings.pitch ? 16 : 0);
+  const pitchMax = settings.globe ? 0 : (settings.pitch ? 26 : 8);
+  const ov = overviewCam();
+  const segs = []; let t = 0;
+  const add = (type, dur, data) => { segs.push({ type, start: t, end: t + dur, ...data }); t += dur; };
+
+  add('intro', clamp(2200 / Math.min(p, 1.2), 1600, 3200), { cam: ov, reached: 1 });
+  let prevCam = ov;
+
+  if (stops[0] && stops[0].img && anim.legs.length) {
+    const pc = { center: [stops[0].lng, stops[0].lat], zoom: anim.legs[0].zoom + 0.55, pitch: pitchCruise };
+    add('approach', clamp(750 / p, 350, 950), { a: prevCam, b: pc, caption: '', reached: 1 });
+    add('photo', clamp(2100 / p, 1400, 2600), { cam: pc, stop: stops[0], caption: '', reached: 1 });
+    prevCam = pc;
+  }
+
+  anim.legs.forEach((leg, i) => {
+    const startCam = { center: trailPointAt(leg.pf0), zoom: leg.zoom, pitch: pitchCruise };
+    const endCam = { center: trailPointAt(leg.pf1), zoom: leg.zoom, pitch: pitchCruise };
+    const stopCam = { center: endCam.center, zoom: leg.zoom + 0.55, pitch: pitchCruise };
+    const caption = `${leg.from.name}  →  ${leg.to.name}   ·   ${leg.mode.label}   ·   ${Math.round(leg.dist)} km`;
+    add('approach', clamp(750 / p, 350, 950), { a: prevCam, b: startCam, caption, reached: i + 1 });
+    add('travel', clamp(2200 + leg.dist * 1.1, 2200, 7000) / p, { leg: i, caption, pitchCruise, pitchMax, reached: i + 1 });
+    add('arrival', clamp(680 / p, 400, 950), { a: endCam, b: stopCam, leg: i, caption, reached: i + 2 });
+    if (leg.to.img) add('photo', clamp(2100 / p, 1400, 2600), { cam: stopCam, stop: leg.to, caption, reached: i + 2 });
+    prevCam = stopCam;
+  });
+
+  add('pullback', clamp(1900 / p, 1200, 2600), { a: prevCam, b: ov, reached: stops.length });
+  return { total: t, segs };
+}
+
+function paintFrame(tl, tMs) {
+  const t = clamp(tMs, 0, tl.total - 0.001);
+  let seg = tl.segs[tl.segs.length - 1];
+  for (const s of tl.segs) { if (t < s.end) { seg = s; break; } }
+  const lt = clamp((t - seg.start) / Math.max(1, seg.end - seg.start), 0, 1);
+  const key = seg.type + ':' + seg.start;
+  const entered = anim._seg !== key; anim._seg = key;
+
+  anim.pulse = null; anim.photo = null; anim.titleAlpha = 0;
+  anim.reached = seg.reached;
+  let cam;
+
+  if (seg.type === 'intro') {
+    anim.phase = 'intro'; anim.caption = ''; anim.marker = null;
+    if (entered) setTrailReveal(0);
+    anim.titleAlpha = lt < 0.22 ? lt / 0.22 : (lt > 0.82 ? (1 - lt) / 0.18 : 1);
+    cam = seg.cam;
+  } else if (seg.type === 'approach') {
+    anim.phase = 'pause'; anim.caption = seg.caption; anim.marker = null;
+    cam = interpCam(seg.a, seg.b, lt);
+  } else if (seg.type === 'travel') {
+    const leg = anim.legs[seg.leg];
+    anim.phase = 'leg'; anim.caption = seg.caption; anim.markerMode = leg.modeKey; anim.legIndex = seg.leg;
+    const ef = easeInOut(lt), wave = Math.sin(Math.PI * lt);
+    const span = leg.pf1 - leg.pf0, frac = leg.pf0 + span * ef;
+    anim.marker = trailPointAt(frac);
+    setTrailReveal(frac);
+    const ahead = trailPointAt(Math.min(frac + Math.max(span * 0.02, 1e-4), 1));
+    const brg = bearingDeg(anim.marker, ahead);
+    if (entered || anim.heading == null) anim.heading = brg;
+    else anim.heading += (((brg - anim.heading + 540) % 360) - 180) * 0.25;
+    const lead = trailPointAt(clamp(frac + 0.2 * wave * span, 0, 1));
+    cam = { center: lead, zoom: leg.zoom - 0.4 * wave, pitch: seg.pitchCruise + (seg.pitchMax - seg.pitchCruise) * wave };
+  } else if (seg.type === 'arrival') {
+    const leg = anim.legs[seg.leg];
+    anim.phase = 'pause'; anim.caption = seg.caption; anim.legIndex = seg.leg;
+    setTrailReveal(leg.pf1);
+    anim.marker = trailPointAt(leg.pf1); anim.markerMode = leg.modeKey;
+    anim.pulse = { lng: leg.to.lng, lat: leg.to.lat, k: easeOutCubic(lt) };
+    cam = interpCam(seg.a, seg.b, lt);
+  } else if (seg.type === 'photo') {
+    anim.phase = 'pause'; anim.caption = seg.caption; anim.marker = null;
+    anim.photo = seg.stop.img; anim.photoLabel = seg.stop.name;
+    anim.photoAlpha = lt < 0.16 ? lt / 0.16 : (lt > 0.86 ? (1 - lt) / 0.14 : 1);
+    cam = seg.cam;
+  } else { // pullback
+    anim.phase = 'outro'; anim.caption = ''; anim.marker = null;
+    setTrailReveal(1);
+    cam = interpCam(seg.a, seg.b, lt);
+  }
+
+  map.jumpTo({ center: cam.center, zoom: cam.zoom, pitch: cam.pitch, bearing: 0 });
+}
+
+function runRealtime(tl, token) {
+  return new Promise(resolve => {
+    const t0 = performance.now();
+    function loop(now) {
+      if (token !== cancelToken || !anim.playing) return resolve();
+      const t = now - t0;
+      paintFrame(tl, Math.min(t, tl.total));
+      if (t >= tl.total) return resolve();
+      tick(loop);
+    }
+    loop(performance.now());
+  });
+}
+
+/* ---- offline export: deterministic frame stepping + WebCodecs + mp4 mux ---- */
+function mapFrameSettled(maxWaitMs = 900) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; clearTimeout(cap); resolve(); } };
+    // hard cap: never hang if 'render' doesn't fire (e.g. backgrounded tab)
+    const cap = setTimeout(finish, maxWaitMs);
+    const t0 = performance.now();
+    function attempt() {
+      map.once('render', () => {
+        if (done) return;
+        if (map.areTilesLoaded() || performance.now() - t0 > maxWaitMs) finish();
+        else attempt();
+      });
+      map.triggerRepaint();
+    }
+    attempt();
+  });
+}
+
+let muxerModPromise = null;
+function loadMuxer() {
+  if (!muxerModPromise) {
+    muxerModPromise = import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/+esm')
+      .catch(() => import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/+esm'))   // one retry
+      .catch(e => { muxerModPromise = null; throw e; });
+  }
+  return muxerModPromise;
+}
+
+async function renderOffline(tl, token) {
+  let mux;
+  try {
+    mux = await loadMuxer();
+  } catch (e) { console.warn('offline export unavailable (muxer):', e); return null; }
+
+  const out = $('#output');
+  const fps = settings.quality > 1 ? 60 : 30;
+  if (!out.width || !out.height) { console.warn('offline export unavailable: canvas not sized'); return null; }
+  // Fit within 1920 on the long edge (H.264 level limits; retina canvases are
+  // bigger than any codec level we can rely on) — the downscale from the hi-dpi
+  // canvas doubles as supersampling. Dimensions must be even.
+  const scale = Math.min(1, 1920 / Math.max(out.width, out.height));
+  const W = Math.round(out.width * scale / 2) * 2;
+  const H = Math.round(out.height * scale / 2) * 2;
+  const exp = document.createElement('canvas');
+  exp.width = W; exp.height = H;
+  const ectx = exp.getContext('2d');
+  ectx.imageSmoothingQuality = 'high';
+
+  const muxer = new mux.Muxer({
+    target: new mux.ArrayBufferTarget(),
+    video: { codec: 'avc', width: W, height: H },
+    fastStart: 'in-memory',
+  });
+  let encErr = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (e) { encErr = e; } },
+    error: e => { encErr = e; },
+  });
+  const bitrate = clamp(Math.round(W * H * fps * 0.1), 8_000_000, 32_000_000);
+  // pick the strongest H.264 profile this machine actually supports
+  let configured = false;
+  for (const codec of ['avc1.64002A', 'avc1.640028', 'avc1.4D0028', 'avc1.42E01F']) {
+    try {
+      const cfg = { codec, width: W, height: H, bitrate, framerate: fps };
+      const s = await VideoEncoder.isConfigSupported(cfg);
+      if (s.supported) { encoder.configure(cfg); configured = true; break; }
+    } catch (e) { /* try next */ }
+  }
+  if (!configured) { console.warn('offline export unavailable: no supported encoder config'); return null; }
+
+  const frames = Math.ceil(tl.total / 1000 * fps);
+  const frameUs = Math.round(1e6 / fps);
+  for (let i = 0; i < frames; i++) {
+    if (token !== cancelToken || encErr) {
+      try { encoder.close(); } catch (e) { /* already closed */ }
+      if (token !== cancelToken) return undefined;      // user cancelled
+      console.warn('offline export aborted (encoder error):', encErr);
+      return null;                                       // → realtime fallback
+    }
+    paintFrame(tl, i * 1000 / fps);
+    await mapFrameSettled();
+    ectx.drawImage(out, 0, 0, W, H);
+    try {
+      const vf = new VideoFrame(exp, { timestamp: i * frameUs, duration: frameUs });
+      encoder.encode(vf, { keyFrame: i % (fps * 2) === 0 });
+      vf.close();
+    } catch (e) { encErr = e; continue; }               // handled at loop top
+    while (encoder.encodeQueueSize > 8) await sleep(4);
+    if (i % 3 === 0) loading(true, `Rendering video… ${Math.round(i / frames * 100)}%`);
+  }
+  if (encErr) { try { encoder.close(); } catch (e) {} console.warn('offline export failed late:', encErr); return null; }
+  loading(true, 'Finalizing video…');
+  await encoder.flush();
+  muxer.finalize();
+  loading(false);
+  return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+}
+
+function publishVideo(blob, ext) {
+  const url = URL.createObjectURL(blob);
+  const a = $('#btn-download');
+  a.href = url;
+  a.download = `triptrail.${ext}`;
+  $('#dl-label').textContent = `Download ${ext.toUpperCase()} (${(blob.size / 1048576).toFixed(1)} MB)`;
+  a.classList.remove('hidden');
+  toast(`Video ready as ${ext.toUpperCase()} — click "Download".`);
+}
+
+/* ---- main entry ---- */
 async function play(record) {
   if (stops.length < 2) { toast('Add at least two stops.'); return; }
   if (anim.playing) return;
   syncSettingsFromUI();
 
   loading(true, 'Plotting your route…');
-  // Preview renders at 1x for smoothness (fill-rate is what raster/retina pay for);
-  // recording keeps full resolution (×quality) since it's a one-time export.
+  // Preview renders at 1x for smoothness; export keeps full resolution
+  // (×quality) — offline rendering makes its cost irrelevant.
   if (record) {
     if (settings.quality > 1) map.setPixelRatio(Math.max(basePixelRatio, 1) * settings.quality);
   } else {
@@ -855,148 +1119,53 @@ async function play(record) {
   await sleep(200);
   await precomputeLegs();
   await preloadIcons(Object.keys(MODES), settings.accent);
-  loading(false);
 
   anim.playing = true;
   anim.recording = record;
-  anim.reached = 0; anim.legIndex = -1; anim.marker = null;
-  anim.photo = null; anim.photoAlpha = 0; anim.pulse = null;
+  anim.reached = 0; anim.legIndex = -1; anim.marker = null; anim.heading = null;
+  anim.photo = null; anim.photoAlpha = 0; anim.pulse = null; anim._seg = null;
   const token = ++cancelToken;
   setControls(true);
 
-  // Load the full route once; the story reveals it via a gradient (no per-frame
-  // geometry churn). Hide the dashed plan while playing.
   setSrc('route-bg', EMPTY);
   setSrc('trail', line(anim.fullCoords));
   setTrailReveal(0);
 
-  // For recording, sweep the route once so tiles are cached and the export is
-  // pristine. Preview skips this — motion is constant-speed and tiles pop in
-  // cleanly (raster-fade-duration 0), so playback starts immediately.
   if (record) {
     loading(true, 'Caching map along route… 0%');
     await prewarmTiles(token);
     if (token !== cancelToken) { loading(false); return; }
   }
+
+  const tl = buildTimeline();
   fitToStops(true);
   loading(true, 'Loading overview…');
-  await waitForTiles(record ? 6000 : 2500);
+  await waitForTiles(record ? 5000 : 2000);
   loading(false);
   if (token !== cancelToken) return;
 
   $('#output').classList.add('show');
   startCompositor();
-  startMusic();
-  if (record) startRecorder();
 
-  // INTRO — overview, title fades in
-  anim.phase = 'intro';
-  await fadeProp('titleAlpha', 1, 600, token);
-  await sleep(1500);
-  if (token !== cancelToken) return;
-  await fadeProp('titleAlpha', 0, 600, token);
-
-  anim.reached = 1;
-  await showPhoto(stops[0], token);
-
-  // LEGS
-  for (let i = 0; i < anim.legs.length; i++) {
-    if (token !== cancelToken) return;
-    const leg = anim.legs[i];
-    anim.legIndex = i;
-    anim.markerMode = leg.modeKey;
-    anim.caption = `${leg.from.name}  →  ${leg.to.name}   ·   ${leg.mode.label}   ·   ${Math.round(leg.dist)} km`;
-
-    anim.phase = 'pause';
-    await easeTo({ center: [leg.from.lng, leg.from.lat], zoom: leg.zoom, pitch: settings.globe ? 0 : (settings.pitch ? 14 : 0) }, 800, token);
-    await waitForTiles(3500);           // let the leg's start view render fully
-    await sleep(250);
-
-    anim.phase = 'leg';
-    const dur = clamp(2200 + leg.dist * 1.1, 2200, 7000) / settings.pace;
-    await animateLeg(leg, dur, token);
-    if (token !== cancelToken) return;
-
-    setTrailReveal(leg.pf1);
-    anim.reached = i + 2;
-    firePulse(leg.to);
-
-    anim.phase = 'pause';
-    await sleep(450);
-    await showPhoto(leg.to, token);
-    if (token !== cancelToken) return;
+  // Offline (deterministic, constant-fps) export whenever possible: MP4 without
+  // a music track. Music or WebM falls back to realtime capture.
+  const offline = record && settings.format === 'mp4' && !$('#music').src && typeof VideoEncoder !== 'undefined';
+  if (offline) {
+    let blob = null;
+    try { blob = await renderOffline(tl, token); }
+    catch (e) { console.warn('offline export failed, falling back to realtime:', e); blob = null; }
+    if (blob === undefined) return;                 // cancelled mid-render
+    if (blob) {
+      if (token === cancelToken) { publishVideo(blob, 'mp4'); endPlay(); }
+      return;
+    }
+    // muxer/encoder unavailable → realtime fallback below
   }
 
-  // OUTRO
-  anim.phase = 'outro';
-  anim.caption = '';
-  fitToStops(false);
-  await waitForTiles(2500);
-  await sleep(1700);
-
+  startMusic();
+  if (record) startRecorder();
+  await runRealtime(tl, token);
   if (token === cancelToken) endPlay();
-}
-
-async function showPhoto(stop, token) {
-  if (!stop || !stop.img || token !== cancelToken) return;
-  anim.photo = stop.img;
-  anim.photoLabel = stop.name;
-  await fadeProp('photoAlpha', 1, 320, token);
-  await sleep(1600 / settings.pace);
-  await fadeProp('photoAlpha', 0, 320, token);
-  anim.photo = null;
-}
-
-// Cinematic leg animation. Constant wall-clock speed (no tile-braking, which
-// oscillated and read as stutter) — prewarmed tiles just pop in. The icon and
-// the gradient head are driven from the same Mercator fraction so they never
-// separate. Zoom stays fixed per leg (no mid-leg zoom-in that would fetch new
-// tiles); only a gentle pitch and forward look-ahead add motion.
-function animateLeg(leg, durMs, token) {
-  return new Promise(resolve => {
-    const t0 = performance.now();
-    // Keep pitch gentle — steep pitch on satellite drags in blurry horizon
-    // tiles and looks bad; on the globe, no pitch at all (it distorts badly).
-    const pMax = settings.globe ? 0 : (settings.pitch ? 22 : 8);
-    const pMin = settings.globe ? 0 : (settings.pitch ? 14 : 0);
-    const span = leg.pf1 - leg.pf0;
-    function step(now) {
-      if (token !== cancelToken || !anim.playing) return resolve();
-      const f = clamp((now - t0) / durMs, 0, 1);
-      const ef = easeInOut(f);
-      const wave = Math.sin(Math.PI * f);
-      const frac = leg.pf0 + span * ef;
-      anim.marker = trailPointAt(frac);
-      setTrailReveal(frac);
-      const leadFrac = clamp(frac + 0.22 * wave * span, 0, 1);
-      // gently zoom OUT mid-leg — shows context and reuses coarser cached tiles
-      map.jumpTo({ center: trailPointAt(leadFrac), zoom: leg.zoom - 0.45 * wave, pitch: pMin + (pMax - pMin) * wave, bearing: 0 });
-      if (f < 1) tick(step); else resolve();
-    }
-    tick(step);
-  });
-}
-
-function easeTo(opts, durMs, token) {
-  return new Promise(resolve => {
-    if (token !== cancelToken) return resolve();
-    map.easeTo({ ...opts, duration: durMs });
-    map.once('moveend', resolve);
-    setTimeout(resolve, durMs + 250);
-  });
-}
-
-function fadeProp(key, to, durMs, token) {
-  return new Promise(resolve => {
-    const from = anim[key], t0 = performance.now();
-    function step(now) {
-      if (token !== cancelToken) return resolve();
-      const f = clamp((now - t0) / durMs, 0, 1);
-      anim[key] = from + (to - from) * f;
-      if (f < 1) tick(step); else resolve();
-    }
-    tick(step);
-  });
 }
 
 function endPlay() {
@@ -1005,7 +1174,8 @@ function endPlay() {
   stopCompositor();
   if (anim.recording) stopRecorder();
   anim.recording = false;
-  anim.titleAlpha = 0; anim.caption = ''; anim.photo = null; anim.photoAlpha = 0; anim.pulse = null;
+  anim.titleAlpha = 0; anim.caption = ''; anim.photo = null; anim.photoAlpha = 0;
+  anim.pulse = null; anim._seg = null; anim.heading = null;
   stopMusic();
   map.setPixelRatio(basePixelRatio);
   $('#output').classList.remove('show');
@@ -1013,10 +1183,6 @@ function endPlay() {
   setSrc('trail', EMPTY);
   refreshRoutePreview();
 }
-
-// arrival ripple, drawn by the compositor at a stop
-function firePulse(stop) { anim.pulse = { lng: stop.lng, lat: stop.lat, start: performance.now() }; }
-function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
 
 function stopPlay() { cancelToken++; endPlay(); }
 
@@ -1120,20 +1286,16 @@ function drawScene(ctx, W, H, dpr) {
     }
   });
 
-  // ---- arrival ripple ----
-  if (anim.pulse) {
-    const el = performance.now() - anim.pulse.start;
-    if (el > 1100) { anim.pulse = null; }
-    else if (!occludedByGlobe(anim.pulse.lng, anim.pulse.lat)) {
-      const eo = easeOutCubic(el / 1100);
-      const [px, py] = project(anim.pulse.lng, anim.pulse.lat, dpr);
-      ctx.beginPath(); ctx.arc(px, py, (9 + 42 * eo) * s, 0, Math.PI * 2);
-      ctx.strokeStyle = hexA(accent, 0.5 * (1 - eo)); ctx.lineWidth = 3 * s; ctx.stroke();
-    }
+  // ---- arrival ripple (timeline-driven) ----
+  if (anim.pulse && !occludedByGlobe(anim.pulse.lng, anim.pulse.lat)) {
+    const eo = anim.pulse.k;
+    const [px, py] = project(anim.pulse.lng, anim.pulse.lat, dpr);
+    ctx.beginPath(); ctx.arc(px, py, (9 + 42 * eo) * s, 0, Math.PI * 2);
+    ctx.strokeStyle = hexA(accent, 0.5 * (1 - eo)); ctx.lineWidth = 3 * s; ctx.stroke();
   }
 
-  // ---- moving transport marker (vector icon) ----
-  if (anim.marker && anim.phase === 'leg') {
+  // ---- moving transport marker (vector icon, rotates with heading) ----
+  if (anim.marker && (anim.phase === 'leg' || anim.phase === 'pause')) {
     const [x, y] = project(anim.marker[0], anim.marker[1], dpr);
     const r = 17 * s;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -1142,7 +1304,16 @@ function drawScene(ctx, W, H, dpr) {
     const ic = iconImage(anim.markerMode, accent);
     if (ic.complete && ic.naturalWidth) {
       const side = r * 1.24;
-      ctx.drawImage(ic, x - side / 2, y - side / 2, side, side);
+      const rot = (MODES[anim.markerMode] || {}).directional && anim.heading != null && anim.phase === 'leg';
+      if (rot) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(anim.heading * Math.PI / 180);
+        ctx.drawImage(ic, -side / 2, -side / 2, side, side);
+        ctx.restore();
+      } else {
+        ctx.drawImage(ic, x - side / 2, y - side / 2, side, side);
+      }
     }
   }
 
@@ -1282,14 +1453,7 @@ function startRecorder() {
   mediaRecorder.onstop = () => {
     const type = mediaRecorder.mimeType || 'video/webm';
     const ext = type.includes('mp4') ? 'mp4' : 'webm';
-    const blob = new Blob(recordedChunks, { type });
-    const url = URL.createObjectURL(blob);
-    const a = $('#btn-download');
-    a.href = url;
-    a.download = `triptrail.${ext}`;
-    $('#dl-label').textContent = `Download ${ext.toUpperCase()} (${(blob.size / 1048576).toFixed(1)} MB)`;
-    a.classList.remove('hidden');
-    toast(`Video ready as ${ext.toUpperCase()} — click "Download".`);
+    publishVideo(new Blob(recordedChunks, { type }), ext);
   };
   mediaRecorder.start();
 }
@@ -1431,6 +1595,7 @@ function wire() {
 
 /* ============================================================ boot */
 function boot() {
+  window.addEventListener('unhandledrejection', e => console.warn('unhandled rejection:', e.reason));
   document.documentElement.style.setProperty('--accent', settings.accent);
   if (window.matchMedia('(max-width:820px)').matches) document.body.classList.add('nav-hidden');
   wire();
