@@ -22,6 +22,16 @@
 
 ---
 
+## 🎬 Demo
+
+<p align="center">
+  <img src="assets/demo.gif" alt="TripTrail demo — a ferry follows real shipping lanes from Venice to Athens on a satellite map" width="720"/>
+</p>
+
+<p align="center">
+  <a href="assets/demo.mp4"><b>▶&nbsp;&nbsp;Watch the full demo video</b></a> — a 17-stop round-the-world trip, rendered offline at constant fps by the in-browser engine (1080p60 source).
+</p>
+
 ## ✨ Features
 
 |  | |
