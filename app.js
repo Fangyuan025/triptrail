@@ -1540,25 +1540,10 @@ function wire() {
   };
   $('#sel-style').onchange = e => {
     settings.style = e.target.value;
-    // Raster satellite reprojected onto the globe renders at ~1fps; keep it flat.
-    if (settings.style === 'satellite' && settings.globe) {
-      settings.globe = false; $('#chk-globe').checked = false; applyProjection();
-      toast('Satellite runs flat — globe needs a vector style.');
-    }
     map.setStyle(styleSpec(settings.style), { diff: false });
   };
   $('#sel-aspect').onchange = e => { settings.aspect = e.target.value; layoutStage(); };
-  $('#chk-globe').onchange = e => {
-    settings.globe = e.target.checked;
-    // Satellite (raster) on the globe is unusably slow — fall back to a vector style.
-    if (settings.globe && settings.style === 'satellite') {
-      settings.style = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
-      $('#sel-style').value = settings.style;
-      map.setStyle(styleSpec(settings.style), { diff: false });
-      toast('Globe needs a vector style — switched to Voyager.');
-    }
-    applyProjection();
-  };
+  $('#chk-globe').onchange = e => { settings.globe = e.target.checked; applyProjection(); };
   $('#chk-pitch').onchange = e => { settings.pitch = e.target.checked; map.easeTo({ pitch: settings.pitch ? 50 : 0, duration: 500 }); };
   $('#chk-labels').onchange = e => settings.labels = e.target.checked;
   $('#chk-roads').onchange = e => settings.roads = e.target.checked;
