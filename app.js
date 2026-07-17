@@ -1360,9 +1360,12 @@ function drawScene(ctx, W, H, dpr) {
     const alt = mode.directional ? (anim.alt || 0) : 0;
     const side = (mode.directional ? 34 : 29) * s * (1 + 0.45 * alt);
     const rot = mode.directional && anim.heading != null ? anim.heading * Math.PI / 180 : 0;
-    const icon = iconImage(anim.markerMode, accent);
+    // white glyph: contrasts with the accent trail underneath and with any
+    // basemap; a thin dark rim keeps it readable on light styles too
+    const icon = iconImage(anim.markerMode, '#ffffff');
+    const rim = iconImage(anim.markerMode, '#22303f');
     const shade = iconImage(anim.markerMode, '#000000');
-    if (icon.complete && icon.naturalWidth && shade.complete) {
+    if (icon.complete && icon.naturalWidth && rim.complete && shade.complete) {
       ctx.imageSmoothingQuality = 'high';
       // cast shadow: separates, blurs and fades as the plane climbs
       const drop = (3 + 15 * alt) * s;
@@ -1376,6 +1379,12 @@ function drawScene(ctx, W, H, dpr) {
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(rot);
+      const o = 1.4 * s;
+      ctx.globalAlpha = 0.9;
+      for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o]]) {
+        ctx.drawImage(rim, -side / 2 + dx, -side / 2 + dy, side, side);
+      }
+      ctx.globalAlpha = 1;
       ctx.drawImage(icon, -side / 2, -side / 2, side, side);
       ctx.restore();
     }
