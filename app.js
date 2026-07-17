@@ -30,7 +30,9 @@ function svgIcon(name) {
 }
 
 const iconCache = {};
-function iconImage(name, color, px = 64) {
+// Rasterize at high resolution — icons are drawn up to ~100 device px
+// (retina × cruise scale); downsampling from 256 keeps them crisp.
+function iconImage(name, color, px = 256) {
   const key = `${name}|${color}`;
   if (iconCache[key]) return iconCache[key];
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${px}" height="${px}">${ICONS[name].split('currentColor').join(color)}</svg>`;
@@ -1348,11 +1350,10 @@ function drawScene(ctx, W, H, dpr) {
     ctx.strokeStyle = hexA(accent, 0.5 * (1 - eo)); ctx.lineWidth = 3 * s; ctx.stroke();
   }
 
-  // ---- moving transport marker: badge-free sticker with a cast shadow.
+  // ---- moving transport marker: clean glyph with a cast shadow.
   // The plane flies "in 3D": it grows with simulated altitude while its
   // shadow drops away, spreads and fades — ground vehicles keep a tight
-  // grounded shadow. A white sticker outline keeps every glyph readable
-  // on any basemap (mult.dev-style). ----
+  // grounded shadow. No outline; the shadow provides the separation. ----
   if (anim.marker && (anim.phase === 'leg' || anim.phase === 'pause')) {
     const [x, y] = project(anim.marker[0], anim.marker[1], dpr);
     const mode = MODES[anim.markerMode] || {};
@@ -1360,9 +1361,9 @@ function drawScene(ctx, W, H, dpr) {
     const side = (mode.directional ? 34 : 29) * s * (1 + 0.45 * alt);
     const rot = mode.directional && anim.heading != null ? anim.heading * Math.PI / 180 : 0;
     const icon = iconImage(anim.markerMode, accent);
-    const white = iconImage(anim.markerMode, '#ffffff');
     const shade = iconImage(anim.markerMode, '#000000');
-    if (icon.complete && icon.naturalWidth && white.complete && shade.complete) {
+    if (icon.complete && icon.naturalWidth && shade.complete) {
+      ctx.imageSmoothingQuality = 'high';
       // cast shadow: separates, blurs and fades as the plane climbs
       const drop = (3 + 15 * alt) * s;
       ctx.save();
@@ -1372,14 +1373,9 @@ function drawScene(ctx, W, H, dpr) {
       ctx.filter = `blur(${(1.5 + 3.5 * alt) * s}px)`;
       ctx.drawImage(shade, -side / 2, -side / 2, side, side);
       ctx.restore();
-      // sticker: white outline ring + colored glyph
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(rot);
-      const o = 2.4 * s;
-      for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o], [-o, -o], [o, -o], [-o, o], [o, o]]) {
-        ctx.drawImage(white, -side / 2 + dx, -side / 2 + dy, side, side);
-      }
       ctx.drawImage(icon, -side / 2, -side / 2, side, side);
       ctx.restore();
     }
