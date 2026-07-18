@@ -193,6 +193,15 @@ function greatCircle(a, b, n = 96) {
   for (let i = 1; i < pts.length; i++) {
     pts[i][0] = pts[i - 1][0] + shortestDelta(pts[i - 1][0], pts[i][0]);
   }
+  // Damp toward the straight chord: pure geodesics on very long hops (e.g.
+  // Hong Kong → Toronto) hug the pole and look wrong on a Mercator video —
+  // blend keeps a natural poleward curve without the Arctic detour.
+  const W = 0.45;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    pts[i][0] = pts[i][0] * (1 - W) + (a[0] + (b[0] - a[0]) * t) * W;
+    pts[i][1] = pts[i][1] * (1 - W) + (a[1] + (b[1] - a[1]) * t) * W;
+  }
   return pts;
 }
 
