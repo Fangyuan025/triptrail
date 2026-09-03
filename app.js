@@ -536,11 +536,16 @@ function fitToStops(instant) {
 }
 
 /* ============================================================ stops UI */
+function esc(str) {
+  return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function renderStops() {
   const ol = $('#stops'); ol.innerHTML = '';
   stops.forEach((s, i) => {
     const li = document.createElement('li');
     li.className = 'stop';
+    li.dataset.id = s.id;
     const legSelect = i === 0 ? '' : `
       <div class="leg">
         <span>via</span>
@@ -550,9 +555,9 @@ function renderStops() {
       </div>`;
     li.innerHTML = `
       <div class="top">
-        <div class="idx">${i + 1}</div>
-        ${s.photoUrl ? `<img class="thumb" src="${s.photoUrl}" alt="" />` : ''}
-        <div class="name" title="${s.name}">${s.name}</div>
+        <div class="idx" title="Drag to reorder">${i + 1}</div>
+        ${s.photoUrl ? `<img class="thumb" src="${esc(s.photoUrl)}" alt="" />` : ''}
+        <div class="name" data-rename="${s.id}" title="Click to rename">${esc(s.name)}</div>
         <button class="mini ${s.photoUrl ? 'on' : ''}" data-photo="${s.id}" title="Attach photo">${svgIcon('camera')}</button>
         <button class="mini" data-up="${s.id}" title="Move up">${svgIcon('up')}</button>
         <button class="mini" data-down="${s.id}" title="Move down">${svgIcon('down')}</button>
@@ -572,6 +577,77 @@ function renderStops() {
     photoTargetId = b.dataset.photo;
     $('#file-photo').click();
   });
+  ol.querySelectorAll('[data-rename]').forEach(el => el.onclick = () => startRename(el.dataset.rename, el));
+
+  // Drag to reorder — grab the number badge. The ▲▼ buttons stay as the
+  // touch/keyboard fallback (HTML5 drag-and-drop is pointer-only).
+  ol.querySelectorAll('.stop').forEach(li => {
+    li.querySelector('.idx').addEventListener('mousedown', () => { li.draggable = true; });
+    li.addEventListener('dragstart', e => {
+      li.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', li.dataset.id); } catch (err) { /* Safari */ }
+    });
+    li.addEventListener('dragend', () => {
+      li.classList.remove('dragging');
+      li.draggable = false;
+      commitDomOrder();
+    });
+  });
+  ol.ondragover = e => {
+    const dragging = ol.querySelector('.dragging');
+    if (!dragging) return;
+    e.preventDefault();
+    const before = stopBefore(ol, e.clientY);
+    if (before == null) ol.appendChild(dragging);
+    else if (before !== dragging) ol.insertBefore(dragging, before);
+  };
+}
+
+// first stop whose midpoint is below the pointer — the drop lands above it
+function stopBefore(ol, y) {
+  for (const el of ol.querySelectorAll('.stop:not(.dragging)')) {
+    const r = el.getBoundingClientRect();
+    if (y < r.top + r.height / 2) return el;
+  }
+  return null;
+}
+
+// adopt the order the user dropped the rows into
+function commitDomOrder() {
+  const byId = new Map(stops.map(s => [s.id, s]));
+  const next = [...$('#stops').querySelectorAll('.stop')].map(li => byId.get(li.dataset.id)).filter(Boolean);
+  if (next.length !== stops.length) return renderStops();
+  const changed = next.some((s, i) => s !== stops[i]);
+  stops = next;
+  if (changed) afterStopsChange(); else renderStops();
+}
+
+// click a stop name to rename it in place
+function startRename(sid, nameEl) {
+  const s = stops.find(x => x.id === sid);
+  if (!s) return;
+  const li = nameEl.closest('.stop');
+  li.draggable = false;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'name-edit';
+  input.value = s.name;
+  nameEl.replaceWith(input);
+  input.focus(); input.select();
+  let closed = false;
+  const close = save => {
+    if (closed) return;
+    closed = true;
+    const v = input.value.trim();
+    if (save && v) s.name = v;
+    renderStops();
+  };
+  input.onblur = () => close(true);
+  input.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); close(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(false); }
+  };
 }
 function move(sid, dir) {
   const i = stops.findIndex(s => s.id === sid); const j = i + dir;
