@@ -23,6 +23,9 @@ const ICONS = {
   up: '<path d="M6 14.5 12 8.5 18 14.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   down: '<path d="M6 9.5 12 15.5 18 9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   x: '<path d="M7 7 17 17 M17 7 7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  chev: '<path d="M7 10 12 15 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  check: '<path d="M5.5 12.5 10 17 18.5 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>',
+  note: '<path d="M6 4 H14.5 L18.5 8 V20 H6 Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9 11.5 H15.5 M9 15 H15.5 M9 18 H12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
 };
 
 function svgIcon(name) {
@@ -150,8 +153,17 @@ function haversine(a, b) { // [lng,lat] -> km
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-function toast(msg, ms = 2600) {
-  const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
+function toast(msg, ms = 2600, action) {
+  const t = $('#toast');
+  t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-act'; b.textContent = action.label;
+    b.onclick = () => { t.classList.add('hidden'); action.run(); };
+    t.appendChild(b);
+    ms = Math.max(ms, 6000);
+  }
+  t.classList.add('hidden'); void t.offsetWidth; t.classList.remove('hidden');   // replay the entrance
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add('hidden'), ms);
 }
 function loading(on, text = 'Working…') {
@@ -361,10 +373,6 @@ function pointAt(path, frac) {
   const a = path.coords[i - 1], b = path.coords[i];
   return { pos: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], idx: i };
 }
-function sliceTo(path, frac) {
-  const { idx, pos } = pointAt(path, frac);
-  return path.coords.slice(0, idx).concat([pos]);
-}
 function line(coords) { return { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }; }
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
@@ -472,9 +480,8 @@ function addLayers() {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '#9aa6b2', 'line-width': 2, 'line-opacity': 0.28, 'line-dasharray': [1.5, 2.5] } });
 
-  if (settings.glow)
-    ensure('trail-glow', { id: 'trail-glow', type: 'line', source: 'trail',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
+  ensure('trail-glow', { id: 'trail-glow', type: 'line', source: 'trail',
+      layout: { 'line-cap': 'round', 'line-join': 'round', visibility: settings.glow ? 'visible' : 'none' },
       paint: { 'line-color': a, 'line-width': 14, 'line-opacity': 0.32, 'line-blur': 5 } });
   ensure('trail-casing', { id: 'trail-casing', type: 'line', source: 'trail',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
@@ -542,27 +549,38 @@ function esc(str) {
 
 function renderStops() {
   const ol = $('#stops'); ol.innerHTML = '';
+  if (!stops.length) {
+    ol.innerHTML = `<li class="empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
+      <b>No stops yet</b>Search a city above, click the map, or import a trip file.</li>`;
+  }
   stops.forEach((s, i) => {
     const li = document.createElement('li');
     li.className = 'stop';
     li.dataset.id = s.id;
-    const legSelect = i === 0 ? '' : `
+    const prev = stops[i - 1];
+    const km = prev ? Math.round(haversine([prev.lng, prev.lat], [s.lng, s.lat])) : 0;
+    // the leg arriving at this stop, drawn on the rail between the two
+    const leg = i === 0 ? '' : `
       <div class="leg">
-        <span>via</span>
-        <select data-mode="${s.id}">
-          ${Object.entries(MODES).map(([k, m]) => `<option value="${k}" ${s.mode === k ? 'selected' : ''}>${m.label}</option>`).join('')}
-        </select>
+        <button class="leg-chip" data-mode="${s.id}" aria-haspopup="listbox" aria-expanded="false"
+          title="How you travelled here" aria-label="Transport to ${esc(s.name)}: ${MODES[s.mode]?.label || 'Plane'}">
+          ${svgIcon(MODES[s.mode] ? s.mode : 'plane')}<span>${MODES[s.mode]?.label || 'Plane'}</span>${svgIcon('chev')}
+        </button>
+        <span class="leg-km">≈ ${km.toLocaleString('en-US')} km</span>
       </div>`;
-    li.innerHTML = `
+    const note = noteRow(s);
+    li.innerHTML = `${leg}
       <div class="top">
         <div class="idx" title="Drag to reorder">${i + 1}</div>
         ${s.photoUrl ? `<img class="thumb" src="${esc(s.photoUrl)}" alt="" />` : ''}
         <div class="name" data-rename="${s.id}" title="Click to rename">${esc(s.name)}</div>
-        <button class="mini ${s.photoUrl ? 'on' : ''}" data-photo="${s.id}" title="Attach photo">${svgIcon('camera')}</button>
+        <button class="mini ${s.photoUrl ? 'on' : ''}" data-photo="${s.id}" title="${s.photoUrl ? 'Replace photo' : 'Attach photo'}">${svgIcon('camera')}</button>
+        <button class="mini ${s.note && s.note.trim() ? 'on' : ''}" data-note="${s.id}" title="${s.note ? 'Edit note' : 'Add a note'}">${svgIcon('note')}</button>
         <button class="mini" data-up="${s.id}" title="Move up">${svgIcon('up')}</button>
         <button class="mini" data-down="${s.id}" title="Move down">${svgIcon('down')}</button>
         <button class="mini" data-del="${s.id}" title="Remove">${svgIcon('x')}</button>
-      </div>${legSelect}`;
+      </div>${note ? `<div class="note-row">${note}</div>` : ''}`;
     ol.appendChild(li);
   });
   $('#stop-count').textContent = stops.length;
@@ -570,8 +588,22 @@ function renderStops() {
   ol.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { stops = stops.filter(s => s.id !== b.dataset.del); afterStopsChange(); });
   ol.querySelectorAll('[data-up]').forEach(b => b.onclick = () => move(b.dataset.up, -1));
   ol.querySelectorAll('[data-down]').forEach(b => b.onclick = () => move(b.dataset.down, 1));
-  ol.querySelectorAll('[data-mode]').forEach(sel => sel.onchange = () => {
-    const s = stops.find(x => x.id === sel.dataset.mode); if (s) { s.mode = sel.value; refreshRoutePreview(); }
+  ol.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => openModeMenu(b.dataset.mode));
+  ol.querySelectorAll('[data-note], [data-note-open]').forEach(b => b.onclick = () => {
+    const s = stops.find(x => x.id === (b.dataset.note || b.dataset.noteOpen));
+    if (!s) return;
+    s._noteOpen = !s._noteOpen;
+    renderStops();
+    if (s._noteOpen) { const ta = ol.querySelector(`[data-note-input="${s.id}"]`); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
+  });
+  ol.querySelectorAll('[data-note-input]').forEach(ta => {
+    const s = stops.find(x => x.id === ta.dataset.noteInput);
+    ta.oninput = () => {
+      s.note = ta.value.slice(0, NOTE_MAX);
+      const btn = ol.querySelector(`[data-note="${s.id}"]`);
+      if (btn) btn.classList.toggle('on', !!s.note.trim());
+    };
+    ta.onkeydown = e => { if (e.key === 'Escape') { s._noteOpen = false; renderStops(); } };
   });
   ol.querySelectorAll('[data-photo]').forEach(b => b.onclick = () => {
     photoTargetId = b.dataset.photo;
@@ -594,6 +626,7 @@ function renderStops() {
       commitDomOrder();
     });
   });
+  scheduleSave();
   ol.ondragover = e => {
     const dragging = ol.querySelector('.dragging');
     if (!dragging) return;
@@ -602,6 +635,114 @@ function renderStops() {
     if (before == null) ol.appendChild(dragging);
     else if (before !== dragging) ol.insertBefore(dragging, before);
   };
+}
+
+// note editor when open; otherwise a one-line preview of an existing note
+/* ============================================================ menus */
+// One popover drives every dropdown: the transport chips and each <select>
+// (kept hidden as the source of truth). Native menus and focus boxes clash
+// with the studio look.
+let menuOwner = null; // { key, anchor: () => Element, pick: value => void }
+function toggleMenu(owner, items, value) {
+  if (menuOwner?.key === owner.key) return closeMenu(true);
+  closeMenu();
+  const el = owner.anchor(); if (!el) return;
+  const menu = $('#menu');
+  menu.innerHTML = items.map(it => `
+    <button class="menu-item ${it.value === value ? 'on' : ''}" role="option" aria-selected="${it.value === value}" data-value="${esc(it.value)}" tabindex="-1">
+      ${it.icon ? svgIcon(it.icon) : ''}<span class="menu-label">${esc(it.label)}</span>
+      ${it.hint ? `<span class="menu-hint">${esc(it.hint)}</span>` : ''}<span class="tick">${it.value === value ? svgIcon('check') : ''}</span>
+    </button>`).join('');
+  menu.classList.remove('hidden');
+  const r = el.getBoundingClientRect();
+  menu.style.minWidth = `${Math.max(178, r.width)}px`;
+  const h = menu.offsetHeight, w = menu.offsetWidth;
+  const below = r.bottom + 6 + h <= innerHeight - 8;
+  menu.classList.toggle('up', !below);
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - w - 8))}px`;
+  menu.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - 6 - h)}px`;
+  menuOwner = owner;
+  el.setAttribute('aria-expanded', 'true');
+  (menu.querySelector('.on') || menu.firstElementChild).focus({ preventScroll: true });
+}
+function closeMenu(refocus) {
+  if (!menuOwner) return;
+  const el = menuOwner.anchor();
+  if (el) { el.setAttribute('aria-expanded', 'false'); if (refocus) el.focus({ preventScroll: true }); }
+  $('#menu').classList.add('hidden');
+  menuOwner = null;
+}
+function pickMenu(value) {
+  const owner = menuOwner;
+  closeMenu();
+  owner.pick(value);
+  const el = owner.anchor(); if (el) el.focus({ preventScroll: true });
+}
+function initMenu() {
+  const menu = $('#menu');
+  menu.onclick = e => { const it = e.target.closest('.menu-item'); if (it && menuOwner) pickMenu(it.dataset.value); };
+  menu.onkeydown = e => {
+    const items = [...menu.querySelectorAll('.menu-item')];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault(); items[e.key === 'Home' ? 0 : items.length - 1].focus();
+    } else if (e.key === 'Escape') { e.preventDefault(); closeMenu(true); }
+    else if (e.key === 'Tab') closeMenu(true);
+  };
+  document.addEventListener('pointerdown', e => {
+    if (menuOwner && !e.target.closest('#menu, [aria-haspopup="listbox"]')) closeMenu();
+  });
+  // the menu is position:fixed, so anything that moves its anchor closes it
+  $('#sidebar').addEventListener('scroll', () => closeMenu(), true);
+  window.addEventListener('resize', () => closeMenu());
+  document.querySelectorAll('#sidebar select:not(.sr-only)').forEach(enhanceSelect);
+}
+function openModeMenu(id) {
+  const s = stops.find(x => x.id === id); if (!s) return;
+  toggleMenu({
+    key: `mode:${id}`,
+    anchor: () => $(`#stops [data-mode="${id}"]`),
+    pick: v => { if (MODES[v] && s.mode !== v) { s.mode = v; refreshRoutePreview(); renderStops(); } },
+  }, Object.entries(MODES).map(([k, m]) => ({ value: k, label: m.label, icon: k })), s.mode);
+}
+// Swap a <select> for a button that opens the shared menu. The select stays
+// in the DOM (hidden) so existing change handlers and .value keep working.
+// Option text "Name — hint" shows the hint dimmed.
+function enhanceSelect(sel) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'select-btn';
+  btn.dataset.select = sel.id;
+  btn.setAttribute('aria-haspopup', 'listbox');
+  btn.setAttribute('aria-expanded', 'false');
+  const lbl = sel.closest('.field')?.querySelector('.lbl');
+  if (lbl) btn.setAttribute('aria-label', lbl.textContent.trim());
+  btn.innerHTML = `<span class="select-val"></span><span class="select-hint"></span>${svgIcon('chev')}`;
+  sel.after(btn);
+  sel.classList.add('sr-only'); sel.tabIndex = -1; sel.setAttribute('aria-hidden', 'true');
+  btn.onclick = () => toggleMenu({
+    key: sel.id,
+    anchor: () => btn,
+    pick: v => { if (sel.value !== v) { sel.value = v; sel.dispatchEvent(new Event('change', { bubbles: true })); } syncSelect(sel); },
+  }, [...sel.options].map(o => { const [label, hint] = o.text.split(' — '); return { value: o.value, label, hint }; }), sel.value);
+  syncSelect(sel);
+}
+function syncSelect(sel) {
+  const btn = $(`[data-select="${sel.id}"]`); if (!btn) return;
+  const [label, hint = ''] = (sel.selectedOptions[0]?.text || '').split(' — ');
+  btn.querySelector('.select-val').textContent = label;
+  btn.querySelector('.select-hint').textContent = hint;
+}
+
+const NOTE_MAX = 500;
+function noteRow(s) {
+  if (s._noteOpen) {
+    return `<textarea class="note-input" data-note-input="${s.id}" rows="2" maxlength="${NOTE_MAX}" placeholder="Add a note — shown on the photo, or beside the stop">${esc(s.note || '')}</textarea>`;
+  }
+  return s.note && s.note.trim() ? `<div class="note-preview" data-note-open="${s.id}" title="Edit note">${esc(s.note)}</div>` : '';
 }
 
 // first stop whose midpoint is below the pointer — the drop lands above it
@@ -751,16 +892,15 @@ function importRouteFile(file) {
   rd.onload = () => {
     try {
       const text = rd.result;
-      let pts = [];
+      let pts = [], meta = null;
       if (/\.gpx$/i.test(file.name)) pts = parseGPX(text);
       else if (/\.kml$/i.test(file.name)) pts = parseKML(text);
-      else pts = parseGeoJSON(text);
+      else ({ points: pts, meta } = parseGeoJSON(text));
       if (!pts.length) { toast('No usable points found in that file.'); return; }
-      pts = samplePoints(pts, 30);
-      stops = pts.map(p => ({ id: id(), name: p.name || `${p.lat.toFixed(3)}, ${p.lng.toFixed(3)}`, lng: p.lng, lat: p.lat, mode: p.mode || 'car' }));
-      afterStopsChange();
+      if (!meta) pts = samplePoints(pts, 30);   // a TripTrail export keeps every stop
+      loadStops(pts, meta);
       stops.filter(s => /^[\d.,\s-]+$/.test(s.name)).slice(0, 5).forEach((s, i) => setTimeout(() => reverseName(s), i * 1100));
-      toast(`Imported ${stops.length} stops from ${file.name}.`);
+      toast(meta ? `Loaded "${settings.title}" — ${stops.length} stops.` : `Imported ${stops.length} stops from ${file.name}.`);
     } catch (e) { toast('Could not parse that file.'); }
   };
   rd.readAsText(file);
@@ -797,6 +937,10 @@ function parseKML(text) {
   });
   return out;
 }
+// Imported files are untrusted: only inline raster images are accepted as
+// photos (a remote URL would make the page fetch from an arbitrary host).
+const SAFE_PHOTO = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+
 function parseGeoJSON(text) {
   const j = JSON.parse(text);
   const feats = j.type === 'FeatureCollection' ? j.features : [j];
@@ -804,16 +948,165 @@ function parseGeoJSON(text) {
   feats.forEach(f => {
     const g = f.geometry || f;
     const p = f.properties || {};
-    const name = p.name || p.title || '';
+    const name = String(p.name || p.title || '').slice(0, 120);
     const rawMode = (p.mode || p.transport || '').toString().toLowerCase();
     const mode = MODES[rawMode] ? rawMode : (MODE_ALIASES[rawMode] || null);
+    const noteSrc = p.note ?? p.description;
+    const note = typeof noteSrc === 'string' ? noteSrc.slice(0, NOTE_MAX) : '';
+    const photo = typeof p.photo === 'string' && SAFE_PHOTO.test(p.photo) ? p.photo : null;
     if (!g) return;
-    if (g.type === 'Point') out.push({ lng: g.coordinates[0], lat: g.coordinates[1], name, mode });
+    if (g.type === 'Point') out.push({ lng: g.coordinates[0], lat: g.coordinates[1], name, mode, note, photo });
     if (g.type === 'LineString') g.coordinates.forEach(c => out.push({ lng: c[0], lat: c[1], name: '' }));
-    if (g.type === 'MultiPoint') g.coordinates.forEach(c => out.push({ lng: c[0], lat: c[1], name, mode }));
+    if (g.type === 'MultiPoint') g.coordinates.forEach(c => out.push({ lng: c[0], lat: c[1], name, mode, note }));
   });
-  return out.filter(p => isFinite(p.lat) && isFinite(p.lng));
+  const meta = j && typeof j.triptrail === 'object' && j.triptrail ? j.triptrail : null;
+  return { points: out.filter(p => isFinite(p.lat) && isFinite(p.lng)), meta };
 }
+/* ---- trip persistence: autosave + GeoJSON export share one serializer ---- */
+const SAVE_KEY = 'triptrail:trip';
+const SETTING_KEYS = ['style', 'aspect', 'accent', 'globe', 'pitch', 'labels', 'roads', 'glow', 'pace', 'title', 'subtitle', 'watermark', 'format', 'quality'];
+
+// Re-encode an attached photo as a JPEG data URL, longest side capped.
+function photoData(img, maxSide, quality) {
+  const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height;
+  const sc = Math.min(1, maxSide / Math.max(w0, h0));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w0 * sc)); c.height = Math.max(1, Math.round(h0 * sc));
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);   // flatten transparency for JPEG
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', quality);
+}
+
+// The trip as a GeoJSON FeatureCollection: one Point per stop carrying name,
+// mode, note and (optionally) its photo; settings ride in a `triptrail` member.
+function tripToGeoJSON({ photoSide = 0, photoQuality = 0.85 } = {}) {
+  syncSettingsFromUI();
+  const r6 = v => Math.round(v * 1e6) / 1e6;
+  return {
+    type: 'FeatureCollection',
+    name: settings.title,
+    triptrail: { version: 1, settings: Object.fromEntries(SETTING_KEYS.map(k => [k, settings[k]])) },
+    features: stops.map(s => {
+      const props = { name: s.name, mode: s.mode };
+      if (s.note && s.note.trim()) props.note = s.note;
+      if (photoSide) {
+        if (s.img) props.photo = (s._photoCache ||= {})[photoSide] ||= photoData(s.img, photoSide, photoQuality);
+        else if (s._pendingPhoto) props.photo = s._pendingPhoto;   // still decoding after a restore
+      }
+      return { type: 'Feature', properties: props, geometry: { type: 'Point', coordinates: [r6(s.lng), r6(s.lat)] } };
+    }),
+  };
+}
+
+function exportTrip() {
+  if (!stops.length) { toast('Add some stops first.'); return; }
+  const fc = tripToGeoJSON({ photoSide: 2048, photoQuality: 0.9 });
+  const blob = new Blob([JSON.stringify(fc, null, 1)], { type: 'application/geo+json' });
+  const slug = (settings.title || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '') || 'trip';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${slug}.geojson`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  const n = stops.filter(s => s.img).length;
+  toast(`Exported ${stops.length} stops${n ? ` and ${n} photo${n > 1 ? 's' : ''}` : ''} — import the file to pick up where you left off.`);
+}
+
+// Attach a photo from a blob: or data: URL; the previous blob URL is released.
+function attachPhoto(stop, url, onDone) {
+  if (url.startsWith('data:')) stop._pendingPhoto = url;
+  const img = new Image();
+  img.onload = () => {
+    if (stop.photoUrl && stop.photoUrl.startsWith('blob:') && stop.photoUrl !== url) URL.revokeObjectURL(stop.photoUrl);
+    stop.photoUrl = url; stop.img = img; stop._photoCache = null; stop._pendingPhoto = null;
+    renderStops();
+    if (onDone) onDone(true);
+  };
+  img.onerror = () => {
+    stop._pendingPhoto = null;
+    if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+    if (onDone) onDone(false);
+  };
+  img.src = url;
+}
+
+// Replace the trip with parsed points (any import format, or the autosave).
+function loadStops(points, meta) {
+  for (const s of stops) if (s.photoUrl && s.photoUrl.startsWith('blob:')) URL.revokeObjectURL(s.photoUrl);
+  stops = points.map(p => ({
+    id: id(), name: p.name || `${p.lat.toFixed(3)}, ${p.lng.toFixed(3)}`, lng: p.lng, lat: p.lat,
+    mode: MODES[p.mode] ? p.mode : (meta ? 'plane' : 'car'), note: p.note || '',
+  }));
+  points.forEach((p, i) => { if (p.photo) attachPhoto(stops[i], p.photo); });
+  if (meta && meta.settings && typeof meta.settings === 'object') applySettings(meta.settings);
+  afterStopsChange();
+}
+
+// Apply validated settings (from an import or the autosave) to state and form.
+function applySettings(src) {
+  const has = (sel, v) => [...$(sel).options].some(o => o.value === String(v));
+  const next = {};
+  for (const k of SETTING_KEYS) if (k in src && typeof src[k] === typeof settings[k]) next[k] = src[k];
+  if ('style' in next && !has('#sel-style', next.style)) delete next.style;
+  if ('aspect' in next && !has('#sel-aspect', next.aspect)) delete next.aspect;
+  if ('format' in next && !has('#sel-format', next.format)) delete next.format;
+  if ('quality' in next && ![1, 2].includes(next.quality)) delete next.quality;
+  if ('accent' in next && !/^#[0-9a-f]{6}$/i.test(next.accent)) delete next.accent;
+  if ('pace' in next) next.pace = clamp(next.pace, 0.4, 2.2) || 1;
+  for (const k of ['title', 'subtitle', 'watermark']) if (k in next) next[k] = next[k].slice(0, 120);
+  const styleChanged = 'style' in next && next.style !== settings.style;
+  Object.assign(settings, next);
+
+  $('#inp-title').value = settings.title; $('#inp-subtitle').value = settings.subtitle;
+  $('#inp-watermark').value = settings.watermark; $('#inp-accent').value = settings.accent;
+  $('#sel-style').value = settings.style; $('#sel-aspect').value = settings.aspect;
+  $('#sel-format').value = settings.format; $('#sel-quality').value = String(settings.quality);
+  $('#rng-pace').value = settings.pace;
+  $('#chk-globe').checked = settings.globe; $('#chk-pitch').checked = settings.pitch;
+  $('#chk-labels').checked = settings.labels; $('#chk-roads').checked = settings.roads;
+  $('#chk-glow').checked = settings.glow;
+  syncControls();
+  layoutStage();
+  if (!map) return;                 // boot: initMap() reads settings directly
+  if (styleChanged) map.setStyle(styleSpec(settings.style), { diff: false });   // style.load re-applies the rest
+  else { applyProjection(); applyAccent(); applyGlow(); }
+}
+
+let saveTimer = null, savedWithoutPhotos = false, restoring = false;
+function scheduleSave() {
+  if (restoring) return;
+  clearTimeout(saveTimer);
+  setSaveState('saving', 'Saving…');
+  saveTimer = setTimeout(saveTrip, 600);
+}
+function saveTrip() {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(tripToGeoJSON({ photoSide: 1024, photoQuality: 0.82 })));
+    savedWithoutPhotos = false;
+    setSaveState('', 'Saved');
+  } catch (e) {
+    // over quota with photos: keep everything else, and say so once
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(tripToGeoJSON()));
+      setSaveState('warn', 'Saved without photos');
+      if (!savedWithoutPhotos) { savedWithoutPhotos = true; toast('Photos are too large to autosave — use Export to keep them.'); }
+    } catch (e2) { setSaveState('off', 'Autosave unavailable'); }
+  }
+}
+function restoreTrip() {
+  let raw = null;
+  try { raw = localStorage.getItem(SAVE_KEY); } catch (e) { return; }
+  if (!raw) return;
+  restoring = true;
+  try {
+    const { points, meta } = parseGeoJSON(raw);
+    if (points.length || meta) loadStops(points, meta);
+  } catch (e) { console.warn('saved trip unreadable, starting fresh:', e); }
+  restoring = false;
+}
+
 function samplePoints(pts, max) {
   if (pts.length <= max) return pts;
   const out = [];
@@ -985,13 +1278,24 @@ function buildTimeline() {
   const segs = []; let t = 0;
   const add = (type, dur, data) => { segs.push({ type, start: t, end: t + dur, ...data }); t += dur; };
 
+  // reading time for a note: barely scaled by pace, so fast cuts stay legible
+  const readMs = st => {
+    const n = st.note ? st.note.trim().length : 0;
+    return n ? clamp(900 + n * 55, 1400, 4800) / Math.sqrt(p) : 0;
+  };
+  // hold on an arrived stop: photo card (with its note) or a note bubble
+  const hold = (stop, cam, caption, reached) => {
+    if (stop.img) add('photo', clamp(2100 / p, 1400, 2600) + readMs(stop), { cam, stop, caption, reached });
+    else if (readMs(stop)) add('note', readMs(stop), { cam, stop, caption, reached });
+  };
+
   add('intro', clamp(2200 / Math.min(p, 1.2), 1600, 3200), { cam: ov, reached: 1 });
   let prevCam = ov;
 
-  if (stops[0] && stops[0].img && anim.legs.length) {
+  if (stops[0] && (stops[0].img || readMs(stops[0])) && anim.legs.length) {
     const pc = { center: [stops[0].lng, stops[0].lat], zoom: anim.legs[0].zoom + 0.55, pitch: pitchCruise };
     add('approach', clamp(750 / p, 350, 950), { a: prevCam, b: pc, caption: '', reached: 1 });
-    add('photo', clamp(2100 / p, 1400, 2600), { cam: pc, stop: stops[0], caption: '', reached: 1 });
+    hold(stops[0], pc, '', 1);
     prevCam = pc;
   }
 
@@ -1003,7 +1307,7 @@ function buildTimeline() {
     add('approach', clamp(750 / p, 350, 950), { a: prevCam, b: startCam, caption, reached: i + 1 });
     add('travel', clamp(2200 + leg.dist * 1.1, 2200, 7000) / p, { leg: i, caption, pitchCruise, pitchMax, reached: i + 1 });
     add('arrival', clamp(680 / p, 400, 950), { a: endCam, b: stopCam, leg: i, caption, reached: i + 2 });
-    if (leg.to.img) add('photo', clamp(2100 / p, 1400, 2600), { cam: stopCam, stop: leg.to, caption, reached: i + 2 });
+    hold(leg.to, stopCam, caption, i + 2);
     prevCam = stopCam;
   });
 
@@ -1019,7 +1323,7 @@ function paintFrame(tl, tMs) {
   const key = seg.type + ':' + seg.start;
   const entered = anim._seg !== key; anim._seg = key;
 
-  anim.pulse = null; anim.photo = null; anim.titleAlpha = 0;
+  anim.pulse = null; anim.photo = null; anim.titleAlpha = 0; anim.noteStop = null; anim.noteAlpha = 0;
   anim.reached = seg.reached;
   let cam;
 
@@ -1055,8 +1359,13 @@ function paintFrame(tl, tMs) {
     cam = interpCam(seg.a, seg.b, lt);
   } else if (seg.type === 'photo') {
     anim.phase = 'pause'; anim.caption = seg.caption; anim.marker = null;
-    anim.photo = seg.stop.img; anim.photoLabel = seg.stop.name;
+    anim.photo = seg.stop.img; anim.photoLabel = seg.stop.name; anim.photoNote = (seg.stop.note || '').trim();
     anim.photoAlpha = lt < 0.16 ? lt / 0.16 : (lt > 0.86 ? (1 - lt) / 0.14 : 1);
+    cam = seg.cam;
+  } else if (seg.type === 'note') {
+    anim.phase = 'pause'; anim.caption = seg.caption; anim.marker = null;
+    anim.noteStop = seg.stop;
+    anim.noteAlpha = lt < 0.14 ? lt / 0.14 : (lt > 0.88 ? (1 - lt) / 0.12 : 1);
     cam = seg.cam;
   } else { // pullback
     anim.phase = 'outro'; anim.caption = ''; anim.marker = null;
@@ -1236,6 +1545,7 @@ async function renderOffline(tl, token) {
 function publishVideo(blob, ext) {
   const url = URL.createObjectURL(blob);
   const a = $('#btn-download');
+  if (a.href.startsWith('blob:')) URL.revokeObjectURL(a.href);
   a.href = url;
   a.download = `triptrail.${ext}`;
   $('#dl-label').textContent = `Download ${ext.toUpperCase()} (${(blob.size / 1048576).toFixed(1)} MB)`;
@@ -1399,8 +1709,14 @@ function occludedByGlobe(lng, lat) {
 }
 
 function drawScene(ctx, W, H, dpr) {
-  const s = dpr;
+  // Overlays are designed for a stage at least 480 CSS px on its short side
+  // and shrink on smaller ones; export resolution follows the stage size, so
+  // a small window would otherwise produce a cramped video.
+  const s = dpr * clamp(Math.min(W, H) / dpr / 480, 0.6, 1);
   const accent = settings.accent;
+  // the lower-third caption owns the bottom strip; cards and notes stay above it
+  const capFs = (settings.aspect === '9:16' ? 17 : 19) * s;
+  const safeTop = 16 * s, safeBottom = H - (capFs + 18 * s) - 26 * s - 12 * s;
 
   // ---- city pins + labels (revealed only once a stop is reached) ----
   stops.forEach((st, i) => {
@@ -1426,6 +1742,40 @@ function drawScene(ctx, W, H, dpr) {
       ctx.fillText(st.name, lx + px, ly + (fs + py * 2) / 2);
     }
   });
+
+  // ---- note bubble (stop has a note but no photo) ----
+  if (anim.noteStop && anim.noteAlpha > 0.01 && !occludedByGlobe(anim.noteStop.lng, anim.noteStop.lat)) {
+    const st = anim.noteStop;
+    const [x, y] = project(st.lng, st.lat, dpr);
+    const fs = (settings.aspect === '9:16' ? 15 : 16) * s, lh = fs * 1.4, pad = 14 * s;
+    ctx.save();
+    ctx.globalAlpha = anim.noteAlpha;
+    ctx.font = `500 ${fs}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+    const maxW = Math.min(320 * s, W * 0.44);
+    const lines = wrapLines(ctx, st.note.trim(), maxW - pad * 2, 6);
+    const bw = Math.max(...lines.map(l => ctx.measureText(l).width)) + pad * 2 + 4 * s;
+    const bh = lines.length * lh + pad * 2;
+    // first corner around the pin that fits the frame above the caption; the
+    // name label sits up and to the right, so above-right clears it
+    const left = 16 * s, right = W - 16 * s;
+    const spots = [
+      [x + 14 * s, y + 18 * s],
+      [x - 14 * s - bw, y + 18 * s],
+      [x + 14 * s, y - 18 * s - bh - (settings.labels ? 34 * s : 0)],
+      [x - 14 * s - bw, y - 18 * s - bh],
+    ];
+    let [bx, by] = spots.find(([px, py]) => px >= left && px + bw <= right && py >= safeTop && py + bh <= safeBottom) || spots[0];
+    bx = clamp(bx, left, right - bw); by = clamp(by, safeTop, Math.max(safeTop, safeBottom - bh));
+    ctx.shadowColor = 'rgba(0,0,0,.4)'; ctx.shadowBlur = 18 * s; ctx.shadowOffsetY = 6 * s;
+    roundRect(ctx, bx, by, bw, bh, 12 * s);
+    ctx.fillStyle = 'rgba(12,16,21,.9)'; ctx.fill();
+    ctx.shadowColor = 'transparent';
+    roundRect(ctx, bx, by, 4 * s, bh, 2 * s);
+    ctx.fillStyle = accent; ctx.fill();
+    ctx.fillStyle = '#f2f5f8'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    lines.forEach((l, i) => ctx.fillText(l, bx + pad + 4 * s, by + pad + lh * (i + 0.5)));
+    ctx.restore();
+  }
 
   // ---- arrival ripple (timeline-driven) ----
   if (anim.pulse && !occludedByGlobe(anim.pulse.lng, anim.pulse.lat)) {
@@ -1502,28 +1852,49 @@ function drawScene(ctx, W, H, dpr) {
     const img = anim.photo, a = anim.photoAlpha;
     ctx.save();
     ctx.globalAlpha = a;
-    const maxW = W * 0.46, maxH = H * 0.56;
-    const sc = Math.min(maxW / img.width, maxH / img.height);
-    const w = img.width * sc, h = img.height * sc;
-    const frame = 12 * s, band = 40 * s;
-    ctx.translate(W / 2, H / 2);
+    const note = anim.photoNote || '';
+    const nfs = 14 * s, nlh = nfs * 1.38;
+    ctx.font = `400 ${nfs}px system-ui, sans-serif`;
+    const frame = 12 * s, labelBand = 40 * s;
+    // size the photo, wrap the note to the card width, then shrink the photo
+    // if the whole card would run into the caption strip
+    const fit = maxH => {
+      const sc = Math.min(W * 0.46 / img.width, maxH / img.height);
+      const w = img.width * sc, h = img.height * sc;
+      const lines = note ? wrapLines(ctx, note, Math.max(w, 240 * s) - 8 * s, 4) : [];
+      const band = labelBand + (lines.length ? lines.length * nlh + 10 * s : 0);
+      return { w, h, lines, band, total: h + frame * 2 + band };
+    };
+    const room = safeBottom - safeTop;
+    let card = fit(H * (note ? 0.46 : 0.56));
+    if (card.total > room) card = fit(Math.max(room * 0.3, room - frame * 2 - card.band));
+    const { w, h, lines, band } = card;
+    const cardW = Math.max(w, 240 * s) + frame * 2;
+    const cardTop = Math.max(safeTop, (safeTop + safeBottom - card.total) / 2);
+    ctx.translate(W / 2, cardTop + frame + h / 2);
     ctx.rotate(-0.035 + 0.02 * (1 - a));
     ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 30 * s; ctx.shadowOffsetY = 10 * s;
     ctx.fillStyle = '#fff';
-    ctx.fillRect(-w / 2 - frame, -h / 2 - frame, w + frame * 2, h + frame * 2 + band);
+    ctx.fillRect(-cardW / 2, -h / 2 - frame, cardW, h + frame * 2 + band);
     ctx.shadowColor = 'transparent';
     ctx.drawImage(img, -w / 2, -h / 2, w, h);
-    ctx.fillStyle = '#333';
+    ctx.fillStyle = '#222';
     ctx.font = `600 ${16 * s}px system-ui, sans-serif`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(anim.photoLabel || '', 0, h / 2 + frame + band / 2 - 4 * s);
+    const labelY = h / 2 + frame + labelBand / 2 - 4 * s;
+    ctx.fillText(anim.photoLabel || '', 0, labelY);
+    if (lines.length) {
+      ctx.fillStyle = '#5b636d';
+      ctx.font = `400 ${nfs}px system-ui, sans-serif`;
+      lines.forEach((l, i) => ctx.fillText(l, 0, labelY + labelBand / 2 + nlh * (i + 0.5)));
+    }
     ctx.restore();
     ctx.textAlign = 'left';
   }
 
   // ---- lower-third caption ----
   if (anim.caption && (anim.phase === 'leg' || anim.phase === 'pause')) {
-    const fs = (settings.aspect === '9:16' ? 17 : 19) * s;
+    const fs = capFs;
     ctx.font = `600 ${fs}px system-ui, sans-serif`;
     const tw = ctx.measureText(anim.caption).width;
     const px = 16 * s, h = fs + 18 * s;
@@ -1555,14 +1926,42 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
-function wrapText(ctx, text, cx, cy, maxW, lh) {
-  const words = text.split(' '); let lineStr = '', lines = [];
-  for (const w of words) {
-    const test = lineStr ? lineStr + ' ' + w : w;
-    if (ctx.measureText(test).width > maxW && lineStr) { lines.push(lineStr); lineStr = w; }
-    else lineStr = test;
+// Break text into lines that fit maxW. Latin text breaks between words, CJK
+// between characters, explicit newlines are kept, and anything past maxLines
+// is cut with an ellipsis. Closing punctuation (。，」…) sticks to the token
+// before it, so a line never starts with one.
+const WRAP_CLOSE = '[\u3001\u3002\u3009\u300b\u300d\u300f\u3011\u3015\uff01\uff09\uff0c\uff0e\uff1a\uff1b\uff1f\u2026\u2019\u201d]*';
+const WRAP_CJK = '\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef';
+const WRAP_TOKEN = new RegExp(`\\s+|[${WRAP_CJK}]${WRAP_CLOSE}|[^\\s${WRAP_CJK}]+${WRAP_CLOSE}`, 'g');
+function wrapLines(ctx, text, maxW, maxLines = Infinity) {
+  const lines = [];
+  for (const para of String(text).split(/\n/)) {
+    let cur = '';
+    for (const tok of para.match(WRAP_TOKEN) || []) {
+      const test = cur + tok;
+      if (ctx.measureText(test).width <= maxW || !cur.trim()) { cur = test; continue; }
+      lines.push(cur.trimEnd());
+      cur = /^\s+$/.test(tok) ? '' : tok;
+    }
+    // hard-break a single token that is wider than the line by itself
+    while (ctx.measureText(cur).width > maxW && cur.length > 1) {
+      let k = cur.length - 1;
+      while (k > 1 && ctx.measureText(cur.slice(0, k)).width > maxW) k--;
+      lines.push(cur.slice(0, k)); cur = cur.slice(k);
+    }
+    lines.push(cur.trimEnd());
   }
-  if (lineStr) lines.push(lineStr);
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    let last = kept[maxLines - 1];
+    while (last && ctx.measureText(last + '…').width > maxW) last = last.slice(0, -1);
+    kept[maxLines - 1] = last + '…';
+    return kept;
+  }
+  return lines;
+}
+function wrapText(ctx, text, cx, cy, maxW, lh) {
+  const lines = wrapLines(ctx, text, maxW, 3);
   const startY = cy - (lines.length - 1) * lh / 2;
   lines.forEach((l, i) => ctx.fillText(l, cx, startY + i * lh));
 }
@@ -1622,7 +2021,12 @@ function stopRecorder() {
 /* ============================================================ layout / aspect */
 function layoutStage() {
   const area = $('#stage-inner');
-  const r = area.getBoundingClientRect();
+  const cs = getComputedStyle(area);
+  // the padding reserves room for the floating toolbar; fit inside it
+  const r = {
+    width: area.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+    height: area.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+  };
   const [aw, ah] = settings.aspect.split(':').map(Number);
   const ar = aw / ah;
   let w = r.width, h = w / ar;
@@ -1634,6 +2038,62 @@ function layoutStage() {
 }
 
 /* ============================================================ wiring */
+function updatePaceLabel() {
+  $('#pace-val').textContent = settings.pace < 0.8 ? 'Cinematic' : settings.pace > 1.4 ? 'Snappy' : 'Normal';
+  const r = $('#rng-pace');
+  r.style.setProperty('--fill', ((settings.pace - r.min) / (r.max - r.min) * 100) + '%');
+}
+// Segmented buttons drive a hidden <select>, so every other code path keeps
+// reading and writing the select as before.
+function initSegmented() {
+  document.querySelectorAll('.seg[data-for]').forEach(seg => {
+    const sel = document.getElementById(seg.dataset.for);
+    seg.querySelectorAll('button').forEach(b => b.onclick = () => {
+      if (sel.value === b.dataset.value) return;
+      sel.value = b.dataset.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      syncControls();
+    });
+  });
+  document.querySelectorAll('.swatches [data-color]').forEach(b => b.onclick = () => {
+    const inp = $('#inp-accent');
+    inp.value = b.dataset.color;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+function syncControls() {
+  document.querySelectorAll('[data-select]').forEach(b => syncSelect(document.getElementById(b.dataset.select)));
+  document.querySelectorAll('.seg[data-for]').forEach(seg => {
+    const v = document.getElementById(seg.dataset.for).value;
+    seg.querySelectorAll('button').forEach(b => {
+      const on = b.dataset.value === v;
+      b.classList.toggle('active', on); b.setAttribute('aria-checked', on);
+    });
+  });
+  let preset = false;
+  document.querySelectorAll('.swatches [data-color]').forEach(b => {
+    const on = b.dataset.color.toLowerCase() === settings.accent.toLowerCase();
+    preset = preset || on;
+    b.classList.toggle('active', on); b.setAttribute('aria-checked', on);
+  });
+  document.querySelector('.swatch-custom').classList.toggle('active', !preset);
+  updatePaceLabel();
+}
+function setSaveState(kind, text) {
+  const el = $('#save-state');
+  el.className = 'save-state ' + kind;
+  el.textContent = text;
+}
+function applyAccent() {
+  document.documentElement.style.setProperty('--accent', settings.accent);
+  syncControls();
+  TRAIL_LAYERS.forEach(lid => { if (map && map.getLayer(lid)) map.setPaintProperty(lid, 'line-color', settings.accent); });
+}
+// toggled in place — reloading the whole style just for this refetched every tile
+function applyGlow() {
+  if (map && map.getLayer('trail-glow')) map.setLayoutProperty('trail-glow', 'visibility', settings.glow ? 'visible' : 'none');
+}
+
 function setControls(playing) {
   $('#btn-play').disabled = playing;
   $('#btn-record').disabled = playing;
@@ -1657,7 +2117,12 @@ function syncSettingsFromUI() {
 function wire() {
   $('#btn-add').onclick = doSearch;
   $('#inp-search').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-  $('#btn-clear').onclick = () => { stops = []; afterStopsChange(); };
+  $('#btn-clear').onclick = () => {
+    if (!stops.length) return;
+    const before = stops;
+    stops = []; afterStopsChange();
+    toast(`Cleared ${before.length} stop${before.length > 1 ? 's' : ''}.`, 6000, { label: 'Undo', run: () => { stops = before; afterStopsChange(); } });
+  };
 
   $('#btn-build').onclick = buildFromText;
   $('#btn-import').onclick = () => $('#file-route').click();
@@ -1667,23 +2132,24 @@ function wire() {
     const f = e.target.files[0]; e.target.value = '';
     const s = stops.find(x => x.id === photoTargetId);
     if (!f || !s) return;
-    const url = URL.createObjectURL(f);
-    const img = new Image();
-    img.onload = () => { s.photoUrl = url; s.img = img; renderStops(); toast(`Photo attached to ${s.name}.`); };
-    img.src = url;
+    attachPhoto(s, URL.createObjectURL(f), ok => toast(ok ? `Photo attached to ${s.name}.` : 'That file could not be read as an image.'));
   };
 
   $('#btn-music').onclick = () => $('#file-music').click();
   $('#file-music').onchange = e => {
     const f = e.target.files[0]; e.target.value = '';
     if (!f) return;
-    $('#music').src = URL.createObjectURL(f);
+    const m = $('#music');
+    if (m.src.startsWith('blob:')) URL.revokeObjectURL(m.src);
+    m.src = URL.createObjectURL(f);
     $('#music-name').textContent = f.name;
     $('#btn-music-clear').classList.remove('hidden');
   };
   $('#btn-music-clear').onclick = () => {
-    const m = $('#music'); m.pause(); m.removeAttribute('src'); m.load();
-    $('#music-name').textContent = '(none)';
+    const m = $('#music'); m.pause();
+    if (m.src.startsWith('blob:')) URL.revokeObjectURL(m.src);
+    m.removeAttribute('src'); m.load();
+    $('#music-name').textContent = 'none';
     $('#btn-music-clear').classList.add('hidden');
   };
 
@@ -1691,11 +2157,7 @@ function wire() {
   $('#btn-record').onclick = () => { $('#btn-download').classList.add('hidden'); play(true); };
   $('#btn-stop').onclick = stopPlay;
 
-  $('#inp-accent').oninput = e => {
-    settings.accent = e.target.value;
-    document.documentElement.style.setProperty('--accent', settings.accent);
-    TRAIL_LAYERS.forEach(lid => { if (map && map.getLayer(lid)) map.setPaintProperty(lid, 'line-color', settings.accent); });
-  };
+  $('#inp-accent').oninput = e => { settings.accent = e.target.value; applyAccent(); };
   $('#sel-style').onchange = e => {
     settings.style = e.target.value;
     map.setStyle(styleSpec(settings.style), { diff: false });
@@ -1705,11 +2167,12 @@ function wire() {
   $('#chk-pitch').onchange = e => { settings.pitch = e.target.checked; map.easeTo({ pitch: settings.pitch ? 50 : 0, duration: 500 }); };
   $('#chk-labels').onchange = e => settings.labels = e.target.checked;
   $('#chk-roads').onchange = e => settings.roads = e.target.checked;
-  $('#chk-glow').onchange = e => { settings.glow = e.target.checked; if (map) map.setStyle(styleSpec(settings.style), { diff: false }); };
-  $('#rng-pace').oninput = e => {
-    settings.pace = parseFloat(e.target.value);
-    $('#pace-val').textContent = settings.pace < 0.8 ? 'Cinematic' : settings.pace > 1.4 ? 'Snappy' : 'Normal';
-  };
+  $('#chk-glow').onchange = e => { settings.glow = e.target.checked; applyGlow(); };
+  $('#rng-pace').oninput = e => { settings.pace = parseFloat(e.target.value); updatePaceLabel(); };
+  $('#btn-export').onclick = exportTrip;
+  // any form edit persists the trip (debounced)
+  $('#sidebar').addEventListener('input', scheduleSave);
+  $('#sidebar').addEventListener('change', scheduleSave);
   $('#sel-format').onchange = e => settings.format = e.target.value;
   $('#sel-quality').onchange = e => settings.quality = parseInt(e.target.value, 10);
 
@@ -1742,6 +2205,10 @@ function boot() {
   document.documentElement.style.setProperty('--accent', settings.accent);
   if (window.matchMedia('(max-width:820px)').matches) document.body.classList.add('nav-hidden');
   wire();
+  initSegmented();
+  initMenu();
+  restoreTrip();
+  syncControls();
   renderStops();
   initMap();
   layoutStage();

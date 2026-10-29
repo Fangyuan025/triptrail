@@ -46,10 +46,11 @@
 | ✈️ **True great circles** | Long flights curve toward the poles and cross the antimeridian correctly — Tokyo → LA flies the Pacific |
 | 🌍 **Globe & satellite** | MapLibre v5 globe projection with camera-accurate far-side occlusion; free Esri satellite imagery as the default style |
 | 🎥 **Cinematic camera** | Look-ahead tracking, gentle zoom/pitch arcs mid-leg, punch-in with a pulse ripple at every arrival, overview pullback finale |
-| 🎵 **Music, photos & titles** | A music track is decoded, looped/faded to length and muxed as AAC; polaroid photo pop-ups per stop; title card and lower-third captions |
-| 📂 **Import** | GPX / KML / GeoJSON with per-stop `mode` — try the bundled [`demo-journey.geojson`](demo-journey.geojson) |
+| 📝 **Notes, photos & titles** | Attach a note and a photo to any stop — the note is printed under the photo on its polaroid card, or shown as a callout beside the pin; title card and lower-third captions (CJK-aware text wrapping) |
+| 🎵 **Music** | A music track is decoded, looped/faded to length and muxed as AAC |
+| 💾 **Save, share & re-import** | **Export** the whole trip — stops, transport modes, notes, embedded photos and every setting — as one GeoJSON file and **Import** it later to pick up exactly where you left off. Your work also autosaves in the browser. GPX / KML / plain GeoJSON import too — try the bundled [`demo-journey.geojson`](demo-journey.geojson) |
 | 🎨 **7 map styles · 4 aspect ratios** | Satellite, Voyager, Eclipse, Dark Matter, Liberty, Fiord, Positron · 16:9, 9:16, 1:1, 4:5 · custom accent color · optional watermark (off by default) |
-| 📱 **Responsive** | Collapsible sidebar, mobile drawer layout, touch-friendly controls |
+| 🎛️ **Studio UI** | Itinerary rail with per-leg distance and transport chips, inline rename, drag to reorder, undoable clear; collapsible sidebar and mobile drawer layout |
 
 ## 🚀 Quick start
 
@@ -64,10 +65,32 @@ python3 -m http.server 8742
 # open http://localhost:8742
 ```
 
+## 💾 Trip files
+
+**Export** writes a standard GeoJSON `FeatureCollection` that any GIS tool can open. TripTrail keeps its own settings in a `triptrail` member and per-stop extras in each feature's properties; **Import** reads it all back.
+
+```jsonc
+{
+  "type": "FeatureCollection",
+  "name": "My European Adventure",
+  "triptrail": { "version": 1, "settings": { "style": "satellite", "aspect": "16:9", "accent": "#ff5a3c", "pace": 1, "title": "My European Adventure", "...": "..." } },
+  "features": [
+    { "type": "Feature", "geometry": { "type": "Point", "coordinates": [-9.139, 38.722] },
+      "properties": { "name": "Lisbon", "note": "Pastéis de nata in Belém", "photo": "data:image/jpeg;base64,…" } },
+    { "type": "Feature", "geometry": { "type": "Point", "coordinates": [-3.704, 40.417] },
+      "properties": { "name": "Madrid", "mode": "train" } }
+  ]
+}
+```
+
+- `mode` is how you travelled **to** that stop (`plane`, `train`, `car`, `bus`, `boat`, `bike`, `walk`, `camper`, `motorcycle`, `tuktuk`).
+- `note` (or a plain `description`) becomes the stop's note; `photo` is an embedded JPEG/PNG/WebP data URL.
+- Everything is optional — a bare list of named points imports fine, and untrusted values are validated on the way in.
+
 ## 🧭 How it works
 
 1. **Plan** — stops are geocoded with Nominatim; each leg picks a routing engine by transport mode: OSRM for ground, a Dijkstra search over the SeaRoute marine network for boats, great-circle interpolation for long flights.
-2. **Timeline** — the whole story (camera, trail reveal, vehicle, heading, pulses, titles, photos) is a pure function of time, built as intro → approach → travel → arrival → photo → pullback phases.
+2. **Timeline** — the whole story (camera, trail reveal, vehicle, heading, pulses, titles, photos) is a pure function of time, built as intro → approach → travel → arrival → photo / note → pullback phases. Note holds scale with the note's length so there is time to read it.
 3. **Preview** — the timeline plays at wall-clock speed on the live map; the route trail is one GPU line source revealed by a `line-progress` gradient, so nothing re-tessellates per frame.
 4. **Export** — the camera first sweeps the route to warm the tile cache, then the timeline is stepped frame-by-frame: each frame waits for tiles, is composited to canvas, and encoded with `VideoEncoder`; music is rendered offline and muxed as AAC. The result is a constant-fps MP4 with no watermark. (WebM or missing WebCodecs falls back to realtime capture.)
 
